@@ -1,0 +1,30 @@
+# PREPARATION ONLY — do not copy into .github/workflows until the reserved
+# GitHub App / branch-rule / required-check activation is explicitly approved.
+name: NO HANDS Merge Gate External Acceptance
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+jobs:
+  required-check:
+    name: NO HANDS Merge Gate / required-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact reviewed head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Evaluate exact reviewed head
+        uses: nohandsai/company-os/products/nohands-merge-gate@a32b96787e5fa0399363beb6578e1d2ca7778a8e
+        with:
+          config-path: nohands.yml
+          trusted-policy-ref: REPLACE_WITH_APPROVED_POLICY_COMMIT_SHA
+          receipt-path: nohands-merge-gate-receipt.json
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          reviewed-head: ${{ github.event.review.commit_id }}

@@ -1,0 +1,17 @@
+version: 1
+authorized_paths:
+  - src/**
+  - test/**
+  - docs/**
+prohibited_paths:
+  - .github/workflows/deploy.yml
+  - infra/production/**
+private_paths:
+  - .env
+  - secrets/**
+human_review_paths:
+  - package.json
+  - package-lock.json
+required_evidence:
+  - tests
+  - ci
