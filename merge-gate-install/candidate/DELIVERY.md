@@ -2,7 +2,7 @@
 
 Status: **SOURCE_ONLY / FEATURE_OFF / LAUNCH_HOLD**  
 Repository: `nohandsai01/test`  
-Authorized branch: `feat/merge-gate-ci-candidate-20261022`  
+Source-declared scope: `feat/merge-gate-postqa-20261022` (not authenticated branch provenance)
 No hosted CI check, workflow issuer, reviewer identity, production, merge, or deployment proof is asserted.
 
 ## Delivered components
@@ -10,16 +10,16 @@ No hosted CI check, workflow issuer, reviewer identity, production, merge, or de
 | File | Responsibility |
 | --- | --- |
 | `trusted-evidence.yml.example` | Non-executable workflow candidate stored outside `.github/workflows/`; both proposed jobs remain fail closed |
-| `source-contract.json` / `source-contract.cjs` | Strict proposed check names, repository, branch and activation-OFF structural schema |
+| `source-contract.json` / `source-contract.cjs` | Single future Guardian-App required-check name, repository, source-declared branch, and activation-OFF schema |
 | `policy-source-binding.cjs` | Compare static `nohands.yml` required evidence (`tests`, `ci`) and reject any early trusted workflow mapping |
 | `workflow-source-binding.cjs` | Enforce exact inert template bytes and reject changes to the fail-closed workflow example; not hosted evidence |
 | `verify-source-lock.cjs` / `source-lock.json` | Compare the exact Git blob SHA-1 of the pinned candidate source files |
 | `error-codes.json` | Machine-readable allowlist of source-only error codes and their issuing stages |
 | `candidate-preflight.cjs` | One entry point: combines contract, policy, locked bytes and catalog validation |
 
-The workflow template guard is an exact-source allowlist, not a general YAML parser; changing either proposed job or its fail-closed command must be treated as a rejected candidate until separately authorized. The source lock explicitly excludes `source-lock.json` itself to avoid a recursive hash. It is a **change detector for the pinned source set**, not a signed integrity attestation. A malicious party with write permission could modify both source and lock; authoritative controls must independently establish GitHub run identity and workflow provenance.
+The workflow template guard is an exact-source allowlist, not a general YAML parser; changing either example job or its fail-closed command must be treated as a rejected candidate until separately authorized. The source lock explicitly excludes `source-lock.json` itself to avoid a recursive hash. It is a **change detector for the pinned source set**, not a signed integrity attestation. A malicious party with write permission could modify both source and lock; authoritative controls must independently establish an externally governed anchor, GitHub run identity and workflow provenance.
 
-## Proposed offline invocation (NOT executed in this delivery)
+## Offline source-only invocation (may be used for non-authoritative QA)
 
 From the repository root:
 
@@ -27,7 +27,7 @@ From the repository root:
 node merge-gate-install/candidate/candidate-preflight.cjs .
 ```
 
-Never configure this command **or any standalone inspector** as a successful hosted CI check. All candidate CLI entry points deliberately avoid exit code `0`, even when local source bytes match. This prevents a source-only match from being mistaken for genuine hosted check evidence.
+Never configure this command **or any standalone evidence inspector** as a successful hosted CI check. The preflight and evidence inspectors deliberately avoid exit code `0`, even when local source bytes match. The separate advisory `check-change-scope.cjs` can exit `0` when a diff stays in scope; that is only a developer-CI scope result, never hosted trust evidence.
 
 The same nonzero success-equivalent rule applies to:
 
@@ -38,7 +38,7 @@ node merge-gate-install/candidate/verify-source-lock.cjs merge-gate-install/cand
 node merge-gate-install/candidate/workflow-source-binding.cjs merge-gate-install/candidate/trusted-evidence.yml.example
 ```
 
-These are **proposed local invocations only; none were executed**. Use the consolidated preflight for source-only handoff; do not register the individual tools as hosted required status checks.
+These are local source-inspection invocations, not hosted trust issuers. Developer QA has separately executed non-authoritative source tests. Use the consolidated preflight for source-only handoff; do not register the individual tools as hosted required status checks.
 
 | Exit code | Meaning | Permits activation? |
 | --- | --- | --- |
@@ -86,7 +86,8 @@ Complete allowed code inventory is in `error-codes.json`; it includes standalone
 - No live workflow under `.github/workflows/`, and no alteration to GitHub Actions settings.
 - No new required status checks on `main` and no branch protection change.
 - No live GitHub run fetch, trusted issuer mapping, signing or reviewer attestation.
-- No test execution, QA, deployment, merge, production payment or secret handling.
-- `tests` and `ci` are **proposed labels only** until separately provisioned and verified as genuine hosted check contexts.
+- Bounded source-only developer QA is allowed; no hosted trusted-check acceptance, deployment, merge, production payment or secret handling is authorized.
+- `tests` and `ci` are **internal evidence types**, not GitHub required contexts. The sole eventual required context `NO HANDS Merge Gate Required Check` must be issued by the independently authenticated Guardian App, which this source-only candidate cannot impersonate.
+- This candidate has no independently controlled lock anchor. The branch-local hash and its optional externally supplied digest primitive do **not** prove authoritative provenance; activation remains blocked.
 
 Future activation requires a separate authorization and a new, independently reviewed branch/PR after the actual workflow source, trusted writer identity, exact GitHub run association and branch protection status checks are proven. No artifact in this candidate grants that authority.

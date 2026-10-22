@@ -11,7 +11,7 @@
 const fs = require('node:fs');
 
 const REPO = 'nohandsai01/test';
-const BRANCH = 'feat/merge-gate-ci-candidate-20261022';
+const BRANCH = 'feat/merge-gate-postqa-20261022';
 const EVIDENCE_KEYS = ['tests', 'ci'];
 // Tests and CI are separate evidence TYPES, not two identity-free GitHub
 // required checks. The single authoritative context belongs to the dedicated

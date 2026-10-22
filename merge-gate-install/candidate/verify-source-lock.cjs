@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const REPO = 'nohandsai01/test';
-const BRANCH = 'feat/merge-gate-ci-candidate-20261022';
+const BRANCH = 'feat/merge-gate-postqa-20261022';
 const MANAGED_PATHS = Object.freeze([
   'nohands.yml',
   'merge-gate-install/candidate/trusted-evidence.yml.example',
@@ -27,6 +27,87 @@ const MANAGED_PATHS = Object.freeze([
 ]);
 const SHA1 = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+
+// A parsed object loses duplicate JSON members. Inspect the raw lock syntax
+// first so a different JSON consumer cannot see a different activation value.
+function parseUniqueKeySourceLock(bytes) {
+  const raw = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, 'utf8');
+  if (raw.length === 0 || raw.length > 256_000) throw new Error('Invalid lock size.');
+  const input = raw.toString('utf8');
+  if (!Buffer.from(input, 'utf8').equals(raw)) throw new Error('Invalid UTF-8 lock.');
+  const parsed = JSON.parse(input);
+  let offset = 0;
+  const whitespace = () => { while (/\s/.test(input[offset] || '') && offset < input.length) offset++; };
+  const stringToken = () => {
+    const start = offset++;
+    while (offset < input.length) {
+      if (input[offset] === '\\') { offset += 2; continue; }
+      if (input[offset++] === '"') return JSON.parse(input.slice(start, offset));
+    }
+    throw new Error('Unterminated JSON string.');
+  };
+  const walk = () => {
+    whitespace();
+    if (input[offset] === '{') {
+      offset++;
+      whitespace();
+      const keys = new Set();
+      while (input[offset] !== '}') {
+        const key = stringToken();
+        if (keys.has(key)) throw new Error('Duplicate JSON member.');
+        keys.add(key);
+        whitespace();
+        offset++; // colon (the preceding JSON.parse validated grammar)
+        walk();
+        whitespace();
+        if (input[offset] !== ',') break;
+        offset++;
+        whitespace();
+      }
+      offset++; // closing brace
+    } else if (input[offset] === '[') {
+      offset++;
+      whitespace();
+      while (input[offset] !== ']') {
+        walk();
+        whitespace();
+        if (input[offset] !== ',') break;
+        offset++;
+      }
+      offset++; // closing bracket
+    } else if (input[offset] === '"') {
+      stringToken();
+    } else {
+      while (offset < input.length && !/[\s,}\]]/.test(input[offset])) offset++;
+    }
+  };
+  walk();
+  whitespace();
+  if (offset !== input.length) throw new Error('Invalid JSON layout.');
+  return parsed;
+}
+
+// Hash regular files only, not symlink target contents (which Git records as
+// mode 120000 and link-text bytes). Apply this to both source-only CLIs.
+function readManagedRegularFile(root, relativePath) {
+  if (!MANAGED_PATHS.includes(relativePath)) throw new Error('Unmanaged file.');
+  let filename = path.resolve(root);
+  const parts = relativePath.split('/');
+  for (const [index, part] of parts.entries()) {
+    filename = path.join(filename, part);
+    const stat = fs.lstatSync(filename);
+    if (index < parts.length - 1 ? !stat.isDirectory() : !stat.isFile()) {
+      throw new Error('Source path is not a regular Git file.');
+    }
+  }
+  const fd = fs.openSync(filename, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error('Source is not a regular file.');
+    return fs.readFileSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 function gitBlobSha1(bytes) {
   const content = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, 'utf8');
@@ -139,7 +220,7 @@ function inspectExternallyAnchoredLock(rawLockBytes, expectedSha256, sources) {
     return rejected('SOURCE_LOCK_EXTERNAL_ANCHOR_MISMATCH');
   }
   try {
-    const result = inspectSourceLock(JSON.parse(raw.toString('utf8')), sources);
+    const result = inspectSourceLock(parseUniqueKeySourceLock(raw), sources);
     if (result.findings.length) return result;
     return { ...result, status: 'SOURCE_LOCK_MATCHES_EXTERNAL_DIGEST_ONLY',
       externalAnchorProven: false };
@@ -155,12 +236,12 @@ function main(args) {
   }
 
   try {
-    const lock = JSON.parse(fs.readFileSync(args[0], 'utf8'));
+    const lock = parseUniqueKeySourceLock(fs.readFileSync(args[0]));
     const root = path.resolve(args[1]);
     const sources = Object.create(null);
     for (const file of MANAGED_PATHS) {
       // Paths are hard-coded, not provided by the lock file.
-      sources[file] = fs.readFileSync(path.join(root, file));
+      sources[file] = readManagedRegularFile(root, file);
     }
     const result = inspectSourceLock(lock, Object.assign({}, sources));
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
@@ -178,7 +259,8 @@ function main(args) {
   }
 }
 
-module.exports = { gitBlobSha1, inspectSourceLock, inspectExternallyAnchoredLock, MANAGED_PATHS };
+module.exports = { gitBlobSha1, inspectSourceLock, inspectExternallyAnchoredLock,
+  parseUniqueKeySourceLock, readManagedRegularFile, MANAGED_PATHS };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

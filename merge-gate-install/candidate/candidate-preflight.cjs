@@ -11,7 +11,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { validateCandidateContract } = require('./source-contract.cjs');
 const { inspectCandidatePolicy } = require('./policy-source-binding.cjs');
-const { inspectSourceLock, MANAGED_PATHS } = require('./verify-source-lock.cjs');
+const { inspectSourceLock, parseUniqueKeySourceLock, readManagedRegularFile,
+  MANAGED_PATHS } = require('./verify-source-lock.cjs');
 const { inspectWorkflowTemplate } = require('./workflow-source-binding.cjs');
 
 const CANDIDATE = 'merge-gate-install/candidate';
@@ -116,16 +117,17 @@ function main(args) {
   let result;
   try {
     const root = path.resolve(args[0]);
-    const contract = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'source-contract.json'), 'utf8'));
-    const policyText = fs.readFileSync(path.join(root, 'nohands.yml'), 'utf8');
-    const workflowSourceText = fs.readFileSync(path.join(root, CANDIDATE, 'trusted-evidence.yml.example'), 'utf8');
-    const sourceLock = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'source-lock.json'), 'utf8'));
-    const errorCatalog = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'error-codes.json'), 'utf8'));
     const sources = {};
     // This list is owned by the lock verifier, never by untrusted manifest entries.
     for (const file of MANAGED_PATHS) {
-      sources[file] = fs.readFileSync(path.join(root, file));
+      sources[file] = readManagedRegularFile(root, file);
     }
+    // The policy/template/contract inputs and lock hashes use identical bytes.
+    const contract = JSON.parse(sources[CANDIDATE + '/source-contract.json'].toString('utf8'));
+    const policyText = sources['nohands.yml'].toString('utf8');
+    const workflowSourceText = sources[CANDIDATE + '/trusted-evidence.yml.example'].toString('utf8');
+    const sourceLock = parseUniqueKeySourceLock(fs.readFileSync(path.join(root, CANDIDATE, 'source-lock.json')));
+    const errorCatalog = JSON.parse(sources[CANDIDATE + '/error-codes.json'].toString('utf8'));
     result = inspectCandidatePreflight(contract, policyText, workflowSourceText, sourceLock, sources, errorCatalog);
   } catch (_) {
     result = failure('CANDIDATE_PREFLIGHT_INPUT_UNREADABLE');
@@ -135,7 +137,7 @@ function main(args) {
   return result.findings.length ? 1 : 3;
 }
 
-module.exports = { inspectCandidatePreflight };
+module.exports = { inspectCandidatePreflight, main };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));
