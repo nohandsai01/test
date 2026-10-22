@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "scope": {
+    "repository": "nohandsai01/test",
+    "branch": "feat/merge-gate-ci-candidate-20261022",
+    "baseBranch": "main"
+  },
+  "mode": "SOURCE_ONLY",
+  "workflowSource": "merge-gate-install/candidate/trusted-evidence.yml.example",
+  "proposedWorkflowPath": ".github/workflows/nohands-merge-gate-evidence.yml",
+  "activation": {
+    "workflowInstalled": false,
+    "issuerApproved": false,
+    "branchChecksConfigured": false,
+    "featureEnabled": false
+  },
+  "evidence": [
+    {
+      "key": "tests",
+      "checkName": "NO HANDS Merge Gate / tests"
+    },
+    {
+      "key": "ci",
+      "checkName": "NO HANDS Merge Gate / ci"
+    }
+  ]
+}
