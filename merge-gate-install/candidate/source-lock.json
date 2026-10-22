@@ -13,7 +13,7 @@
   "files": [
     {
       "path": "merge-gate-install/candidate/DELIVERY.md",
-      "gitBlobSha1": "42aa6a28e7854a9ce82594e88d6e98fd3c8637b8"
+      "gitBlobSha1": "d51a24f02aac1f2707c741224f52e810926c8717"
     },
     {
       "path": "merge-gate-install/candidate/candidate-preflight.cjs",
@@ -25,11 +25,11 @@
     },
     {
       "path": "merge-gate-install/candidate/policy-source-binding.cjs",
-      "gitBlobSha1": "b9dc1ad4d498174ecc0df6a5841ad5fa21c671f4"
+      "gitBlobSha1": "3adbf98f63e2a033268b590b507f4bce56f2b831"
     },
     {
       "path": "merge-gate-install/candidate/source-contract.cjs",
-      "gitBlobSha1": "2677301ba99905cca66bb95bc49f1d5caf6d3b83"
+      "gitBlobSha1": "f60d5497f11bd856b4705804e40212f5aa519b6b"
     },
     {
       "path": "merge-gate-install/candidate/source-contract.json",
@@ -41,7 +41,7 @@
     },
     {
       "path": "merge-gate-install/candidate/verify-source-lock.cjs",
-      "gitBlobSha1": "3d307876540a74fc85c39aca67aa924cfccc70b1"
+      "gitBlobSha1": "bfac9a8230ccacfd393227793fb2a84015e34845"
     },
     {
       "path": "nohands.yml",
