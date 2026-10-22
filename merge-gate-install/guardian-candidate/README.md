@@ -107,6 +107,65 @@ uses `filter=all`, not the default `latest`. The code rejects counts beyond
 its bounded collection capacity, rather than treating a partial result as
 complete. It uses the pinned REST API version `2022-11-28`.
 
+## Next source-only development batch: App host, onboarding and FAILURE check
+
+The following modules extend PR #4 but **do not install, start, activate or
+deploy** a Guardian GitHub App:
+
+| File | Source-only implementation | Critical limitation |
+| --- | --- | --- |
+| `github-app-identity.cjs` | Signs short-lived RS256 App JWTs; exchanges one owner-configured installation ID for a repository-scoped installation token; provides a **failure-only** `POST /check-runs` function | Requires separately protected App ID/RSA private key, valid installation, `checks:write`, `pull_requests:read`; no `success` writer |
+| `guardian-webhook-runtime.cjs` | Validates raw webhook HMAC SHA-256, event/repository/base/installation, atomic delivery reservation; obtains independently signed policy, invokes source evaluator, and can publish a **failure** check | Host must independently provide webhook secret, trust anchor, signed policy, and durable cross-replica replay store; default OFF |
+| `github-app-onboarding.cjs` | Issues a 256-bit state-bound GitHub installation link and consumes a stored single-use setup intent | GitHub explicitly warns that `installation_id` in a setup redirect is spoofable. Returned state is **NOT** account/installation proof. Separate GitHub user authorization and ownership verification remain necessary |
+| `guardian-http-server.cjs` | Creates an HTTP `/github/webhook` handler and `/healthz` entry point with body and timeout bounds | `createGuardianHttpServer` does **not** call `.listen()`; needs owner-controlled host, TLS termination and operational controls |
+
+### External runtime integration contract — inert by default
+
+```js
+const { createGuardianHttpServer } = require('./guardian-http-server.cjs');
+const server = createGuardianHttpServer({ host: {
+  webhookSecret: protectedWebhookSecret,
+  trustedInstallationId: ownerApprovedInstallationId,
+  guardianAppId: ownerApprovedGuardianAppId,
+  githubAppPrivateKeyPem: protectedAppRsaKey,
+  trustedPolicyPublicKeyPem: protectedIndependentEd25519PublicKey,
+  deliveryStore: durableStoreWithAtomicReserveOnce,
+  getSignedPolicyEnvelope: independentPolicyProvider,
+  enableFailureCheckWrites: false,
+  founderAuthorizedFailureOnly: null,
+} });
+// No .listen(): this is NOT a running service or activation instruction.
+```
+
+Both opt-ins (`enableFailureCheckWrites === true` and an explicit host-owned
+`founderAuthorizedFailureOnly === 'EXPLICIT_FAILURE_ONLY'`) plus verified
+HMAC, exact installation, durable replay reservation and installation token
+are required before source code can even *attempt* a failure check. The token
+minting request scopes access to `nohandsai01/test` and `checks:write` plus
+`pull_requests:read`. In no configuration does this code issue `success`,
+`neutral`, or `skipped` as an authoritative required check result.
+
+`/healthz` is not a readiness/authorization probe. A valid setup callback is
+not proof that an installer has permission to bind the App to an account.
+Neither a successful signed policy shape match nor a successful failure-only
+check proves last-push timing, reviewer provenance, branch protection binding,
+or an owner-authorized product launch. The policy source is external, not a
+PR-authored configuration file.
+
+Source-only integration still needs the independently operated service host,
+registered GitHub App identity, verified installer account binding, durable
+data store, rate limits, observability, approved keys, active branch ruleset,
+and a separate final acceptance gate. There is no attempt to provision any of
+those resources in this batch.
+
+Additional official references:
+
+- https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
+- https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app
+- https://docs.github.com/en/rest/apps/apps
+- https://docs.github.com/en/apps/sharing-github-apps/sharing-your-github-app
+- https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url
+
 ## Non-negotiable missing authority
 
 Even when every field matches, output remains `trusted=false`,
