@@ -1,0 +1,40 @@
+# Candidate developer CI only. NOT a trusted Merge Gate evidence issuer.
+# This workflow does not publish NO HANDS Merge Gate / tests or / ci.
+# It cannot approve installation, branch rules, merge, or launch.
+name: Merge Gate Candidate Source QA (non-authoritative)
+
+on:
+  push:
+    branches:
+      - feat/merge-gate-ci-candidate-20261022
+    paths:
+      - 'merge-gate-install/candidate/**'
+      - 'test/merge-gate-candidate.test.cjs'
+      - '.github/workflows/merge-gate-candidate-qa.yml'
+      - 'nohands.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'merge-gate-install/candidate/**'
+      - 'test/merge-gate-candidate.test.cjs'
+      - '.github/workflows/merge-gate-candidate-qa.yml'
+      - 'nohands.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-source-tests:
+    name: Candidate source tests (not trusted evidence)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Print runner Node version
+        run: node --version
+      - name: Run source-only positive and negative acceptance cases
+        run: node --test test/merge-gate-candidate.test.cjs
