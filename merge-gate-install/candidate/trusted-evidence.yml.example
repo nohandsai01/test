@@ -1,0 +1,36 @@
+# PREPARATION ONLY: non-executable .example outside .github/workflows.
+# No hosted check or CI evidence is created by committing this file.
+# Do not copy into .github/workflows without a separate Founder activation approval.
+name: NO HANDS Merge Gate Evidence Candidate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: NO HANDS Merge Gate / tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reject unapproved test evidence issuer
+        shell: bash
+        run: |
+          echo '::error title=TESTS_EVIDENCE_NOT_APPROVED::No source-bound hosted test runner or trustworthy test command has been approved.'
+          exit 1
+
+  ci:
+    name: NO HANDS Merge Gate / ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reject unapproved CI evidence issuer
+        shell: bash
+        run: |
+          echo '::error title=CI_EVIDENCE_NOT_APPROVED::No source-bound hosted CI runner or authoritative last-push evidence has been approved.'
+          exit 1
