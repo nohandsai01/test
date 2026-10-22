@@ -57,6 +57,11 @@
     ],
     "input": [
       "CANDIDATE_PREFLIGHT_INPUT_UNREADABLE"
+    ],
+    "workflow_template": [
+      "WORKFLOW_TEMPLATE_DRIFT",
+      "WORKFLOW_TEMPLATE_INPUT_INVALID",
+      "WORKFLOW_TEMPLATE_UNREADABLE"
     ]
   }
 }
