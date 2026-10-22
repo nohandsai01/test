@@ -12,16 +12,16 @@
   },
   "files": [
     {
-      "path": "merge-gate-install/candidate/DELIVERY.md",
-      "gitBlobSha1": "d51a24f02aac1f2707c741224f52e810926c8717"
+      "path": "merge-gate-install/candidate/candidate-preflight.cjs",
+      "gitBlobSha1": "0780451b99c68712bcaac2ab836cf0694af044f5"
     },
     {
-      "path": "merge-gate-install/candidate/candidate-preflight.cjs",
-      "gitBlobSha1": "2d0ee1c237e8f18c7efe08927999f76dc7cd6b91"
+      "path": "merge-gate-install/candidate/DELIVERY.md",
+      "gitBlobSha1": "58291278e7921b1cf094d2690c5d02f82403ac48"
     },
     {
       "path": "merge-gate-install/candidate/error-codes.json",
-      "gitBlobSha1": "602f40f37ce88331961eb67f16b4cbae5fd10274"
+      "gitBlobSha1": "9d4cb057a85136ec50b1da780eac50c2d9a268cc"
     },
     {
       "path": "merge-gate-install/candidate/policy-source-binding.cjs",
@@ -41,7 +41,11 @@
     },
     {
       "path": "merge-gate-install/candidate/verify-source-lock.cjs",
-      "gitBlobSha1": "bfac9a8230ccacfd393227793fb2a84015e34845"
+      "gitBlobSha1": "4cab33889ea89d53646f7915606957f7427d8939"
+    },
+    {
+      "path": "merge-gate-install/candidate/workflow-source-binding.cjs",
+      "gitBlobSha1": "79159c74679e32a718a663fc5e4e35d0dea72466"
     },
     {
       "path": "nohands.yml",
