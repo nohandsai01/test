@@ -129,7 +129,8 @@ function main(args) {
   }
   const result = inspectCandidatePolicy(manifest, policyText);
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-  return result.findings.length ? 1 : 0;
+  // A source-only match must never become a green hosted CI check.
+  return result.findings.length ? 1 : 3;
 }
 
 module.exports = { inspectCandidatePolicy, readLiteralTopLevelList };
