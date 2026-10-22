@@ -7,19 +7,10 @@ on:
   push:
     branches:
       - feat/merge-gate-ci-candidate-20261022
-    paths:
-      - 'merge-gate-install/candidate/**'
-      - 'test/merge-gate-candidate.test.cjs'
-      - '.github/workflows/merge-gate-candidate-qa.yml'
-      - 'nohands.yml'
+      - feat/merge-gate-postqa-20261022
   pull_request:
     branches:
       - main
-    paths:
-      - 'merge-gate-install/candidate/**'
-      - 'test/merge-gate-candidate.test.cjs'
-      - '.github/workflows/merge-gate-candidate-qa.yml'
-      - 'nohands.yml'
 
 permissions:
   contents: read
@@ -27,14 +18,28 @@ permissions:
 jobs:
   candidate-source-tests:
     name: Candidate source tests (not trusted evidence)
+    if: ${{ github.event_name == 'push' || github.head_ref == 'feat/merge-gate-ci-candidate-20261022' || github.head_ref == 'feat/merge-gate-postqa-20261022' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout exact triggering commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Print runner Node version
         run: node --version
+      - name: Reject out-of-scope candidate changes
+        run: node merge-gate-install/candidate/check-change-scope.cjs .
       - name: Run source-only positive and negative acceptance cases
         run: node --test test/merge-gate-candidate.test.cjs
+      - name: Verify preflight exits prepared-only, never authority PASS
+        shell: bash
+        run: |
+          set +e
+          node merge-gate-install/candidate/candidate-preflight.cjs . > candidate-preflight-output.json
+          preflight_exit=$?
+          set -e
+          node -e 'const r=require("./candidate-preflight-output.json");if(r.status!=="CANDIDATE_SOURCE_PREPARED_ONLY"||r.trusted!==false||r.activationAllowed!==false||r.hostedCheckEvidence!=="NOT_VERIFIED")process.exit(1)'
+          test "$preflight_exit" -eq 3

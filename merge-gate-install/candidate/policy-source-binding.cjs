@@ -12,9 +12,42 @@ const fs = require('node:fs');
 const { validateCandidateContract } = require('./source-contract.cjs');
 
 const EXPECTED = Object.freeze(['tests', 'ci']);
+const ALLOWED_LIST_SECTIONS = Object.freeze([
+  'authorized_paths', 'prohibited_paths', 'private_paths',
+  'human_review_paths', 'required_evidence', 'trusted_evidence_workflows',
+]);
 
 function add(findings, code, detail) {
   findings.push({ code, detail });
+}
+
+// This source-only checker intentionally accepts a much smaller language than
+// YAML.  Reject *all* alternate top-level key spellings, rather than silently
+// missing a quoted/spaced/flow-style override that a runtime YAML parser may
+// interpret.  The authoritative policy parser is still a separate trust gate.
+function inspectTopLevelSyntax(policyText, findings) {
+  if (typeof policyText !== 'string') return;
+  const seen = new Set();
+  const lines = policyText.replace(/\r\n/g, '\n').split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!line.trim() || /^[ \t]*#/.test(line) || /^[ \t]/.test(line)) continue;
+    const version = /^version: 1(?:[ \t]+#.*)?$/.test(line);
+    const literal = /^([A-Za-z_][A-Za-z_0-9]*):[ \t]*(?:#.*)?$/.exec(line);
+    const key = version ? 'version' : literal?.[1];
+    if (!key) {
+      add(findings, 'POLICY_TOP_LEVEL_SYNTAX_UNSUPPORTED', 'line ' + (i + 1));
+      continue;
+    }
+    if (key !== 'version' && !ALLOWED_LIST_SECTIONS.includes(key)) {
+      add(findings, 'POLICY_TOP_LEVEL_KEY_UNAPPROVED', key);
+    }
+    if (seen.has(key)) add(findings, 'DUPLICATE_POLICY_SECTION', key);
+    seen.add(key);
+  }
+  if (!seen.has('version')) {
+    add(findings, 'POLICY_VERSION_MISSING', 'Expected literal version: 1.');
+  }
 }
 
 // Only a literal top-level YAML list is accepted here. This is an advisory
@@ -78,6 +111,7 @@ function readLiteralTopLevelList(policyText, key, findings) {
 function inspectCandidatePolicy(manifest, policyText) {
   const contract = validateCandidateContract(manifest);
   const findings = [...contract.findings];
+  inspectTopLevelSyntax(policyText, findings);
   const required = readLiteralTopLevelList(policyText, 'required_evidence', findings);
   const mappings = readLiteralTopLevelList(policyText, 'trusted_evidence_workflows', findings);
 

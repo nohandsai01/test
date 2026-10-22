@@ -1,5 +1,8 @@
 # PREPARATION ONLY — do not copy into .github/workflows until the reserved
 # GitHub App / branch-rule / required-check activation is explicitly approved.
+# The sole eventual required context is NO HANDS Merge Gate Required Check,
+# published ONLY by the independently authenticated Guardian App. This inert
+# generic-Actions example must never use or impersonate that exact name.
 name: NO HANDS Merge Gate External Acceptance
 
 on:
@@ -11,7 +14,7 @@ permissions:
 
 jobs:
   required-check:
-    name: NO HANDS Merge Gate / required-check
+    name: NO HANDS Merge Gate / example-only (not trusted)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact reviewed head

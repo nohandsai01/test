@@ -13,10 +13,10 @@ const fs = require('node:fs');
 const REPO = 'nohandsai01/test';
 const BRANCH = 'feat/merge-gate-ci-candidate-20261022';
 const EVIDENCE_KEYS = ['tests', 'ci'];
-const CHECK_NAMES = {
-  tests: 'NO HANDS Merge Gate / tests',
-  ci: 'NO HANDS Merge Gate / ci',
-};
+// Tests and CI are separate evidence TYPES, not two identity-free GitHub
+// required checks. The single authoritative context belongs to the dedicated
+// issuer App, as required by company-os's existing H1 Ruleset contract.
+const REQUIRED_CHECK = 'NO HANDS Merge Gate Required Check';
 const SOURCE_PATH = 'merge-gate-install/candidate/trusted-evidence.yml.example';
 const PROPOSED_PATH = '.github/workflows/nohands-merge-gate-evidence.yml';
 
@@ -52,9 +52,10 @@ function validateCandidateContract(contract) {
   };
 
   exactKeys(contract,
-    ['schemaVersion', 'scope', 'mode', 'workflowSource', 'proposedWorkflowPath', 'activation', 'evidence'],
+    ['schemaVersion', 'scope', 'mode', 'workflowSource', 'proposedWorkflowPath',
+      'authoritativeCheckName', 'activation', 'evidence'],
     'CONTRACT_FIELDS_INVALID');
-  if (contract.schemaVersion !== 1) reject('SCHEMA_VERSION_UNSUPPORTED', 'Only schema version 1 is accepted.');
+  if (contract.schemaVersion !== 2) reject('SCHEMA_VERSION_UNSUPPORTED', 'Only schema version 2 is accepted.');
   if (contract.mode !== 'SOURCE_ONLY') reject('MODE_NOT_SOURCE_ONLY', 'Candidate must remain source-only.');
 
   if (exactKeys(contract.scope, ['repository', 'branch', 'baseBranch'], 'SCOPE_FIELDS_INVALID')) {
@@ -68,6 +69,9 @@ function validateCandidateContract(contract) {
       contract.proposedWorkflowPath !== PROPOSED_PATH) {
     reject('WORKFLOW_SOURCE_PATH_MISMATCH', 'Only the non-executable example at its approved path is allowed.');
   }
+  if (contract.authoritativeCheckName !== REQUIRED_CHECK) {
+    reject('UNAPPROVED_CHECK_NAME', 'One dedicated-App required context is mandatory.');
+  }
 
   const gates = ['workflowInstalled', 'issuerApproved', 'branchChecksConfigured', 'featureEnabled'];
   if (exactKeys(contract.activation, gates, 'ACTIVATION_FIELDS_INVALID')) {
@@ -79,22 +83,19 @@ function validateCandidateContract(contract) {
   }
 
   if (!Array.isArray(contract.evidence) || contract.evidence.length !== 2) {
-    reject('EVIDENCE_SET_INVALID', 'Exactly two proposed checks are required.');
+    reject('EVIDENCE_SET_INVALID', 'Exactly two internal evidence types are required.');
   } else {
     const keys = new Set();
-    const names = new Set();
     for (const item of contract.evidence) {
-      if (!exactKeys(item, ['key', 'checkName'], 'EVIDENCE_FIELDS_INVALID')) continue;
+      if (!exactKeys(item, ['key', 'role'], 'EVIDENCE_FIELDS_INVALID')) continue;
       if (!EVIDENCE_KEYS.includes(item.key)) {
         reject('UNKNOWN_EVIDENCE_KEY', 'Only tests and ci are permitted.');
       }
       if (keys.has(item.key)) reject('DUPLICATE_EVIDENCE_KEY', String(item.key));
       keys.add(item.key);
-      if (item.checkName !== CHECK_NAMES[item.key]) {
+      if (item.role !== 'INTERNAL_EVIDENCE_NOT_REQUIRED_CHECK') {
         reject('UNAPPROVED_CHECK_NAME', String(item.key));
       }
-      if (names.has(item.checkName)) reject('DUPLICATE_CHECK_NAME', String(item.checkName));
-      names.add(item.checkName);
     }
     for (const key of EVIDENCE_KEYS) {
       if (!keys.has(key)) reject('MISSING_EVIDENCE_KEY', key);

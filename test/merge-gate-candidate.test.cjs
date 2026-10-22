@@ -5,14 +5,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const dir = path.join(root, 'merge-gate-install', 'candidate');
 const { validateCandidateContract } = require(path.join(dir, 'source-contract.cjs'));
 const { inspectCandidatePolicy } = require(path.join(dir, 'policy-source-binding.cjs'));
 const { inspectWorkflowTemplate } = require(path.join(dir, 'workflow-source-binding.cjs'));
-const { inspectSourceLock, MANAGED_PATHS } = require(path.join(dir, 'verify-source-lock.cjs'));
+const { inspectSourceLock, inspectExternallyAnchoredLock, MANAGED_PATHS } = require(path.join(dir, 'verify-source-lock.cjs'));
 const { inspectCandidatePreflight } = require(path.join(dir, 'candidate-preflight.cjs'));
+const { inspectChangedPaths } = require(path.join(dir, 'check-change-scope.cjs'));
 
 const read = (name) => fs.readFileSync(path.join(dir, name), 'utf8');
 const json = (name) => JSON.parse(read(name));
@@ -51,7 +53,7 @@ test('contract: enabling a workflow is rejected', () => {
 });
 test('contract: check identity drift is rejected', () => {
   const manifest = json('source-contract.json');
-  manifest.evidence[0].checkName = 'renamed-check';
+  manifest.authoritativeCheckName = 'renamed-check';
   const result = validateCandidateContract(manifest);
   assert(result.findings.some((f) => f.code === 'UNAPPROVED_CHECK_NAME'));
   sourceOnly(result);
@@ -91,6 +93,20 @@ test('policy: changed required evidence is rejected', () => {
   assert(result.findings.some((f) => f.code === 'REQUIRED_EVIDENCE_DRIFT'));
   sourceOnly(result);
 });
+for (const [label, injection] of [
+  ['quoted trusted mapping key', '"trusted_evidence_workflows":\n  - bad\n'],
+  ['spaced trusted mapping key', 'trusted_evidence_workflows :\n  - bad\n'],
+  ['flow-style required evidence override', '"required_evidence": [tests]\n'],
+  ['duplicate version', 'version: 1\n'],
+  ['unknown policy key', 'unapproved_policy_key:\n  - bad\n'],
+]) {
+  test('policy: reject ' + label, () => {
+    const result = inspectCandidatePolicy(json('source-contract.json'), policy() + injection);
+    assert.notEqual(result.status, 'POLICY_BOUND_SOURCE_ONLY');
+    assert(result.findings.length > 0);
+    sourceOnly(result);
+  });
+}
 test('template: exact inert workflow is recognized but never trusted', () => {
   const result = inspectWorkflowTemplate(read('trusted-evidence.yml.example'));
   assert.equal(result.status, 'WORKFLOW_TEMPLATE_SOURCE_ONLY');
@@ -133,6 +149,27 @@ test('lock: removed managed path is rejected', () => {
   assert(result.findings.some((f) => f.code === 'SOURCE_LOCK_FILE_SET_INVALID'));
   sourceOnly(result);
 });
+test('lock: independently supplied digest catches a forged re-pin', () => {
+  const old = read('source-lock.json');
+  const expected = crypto.createHash('sha256').update(old).digest('hex');
+  const forged = json('source-lock.json');
+  forged.files[0].gitBlobSha1 = '0'.repeat(40);
+  const result = inspectExternallyAnchoredLock(JSON.stringify(forged), expected, sources());
+  assert(result.findings.some(f => f.code === 'SOURCE_LOCK_EXTERNAL_ANCHOR_MISMATCH'));
+  sourceOnly(result);
+});
+test('lock: no external digest cannot be treated as verified', () => {
+  const result = inspectExternallyAnchoredLock(read('source-lock.json'), undefined, sources());
+  assert(result.findings.some(f => f.code === 'SOURCE_LOCK_EXTERNAL_ANCHOR_UNAVAILABLE'));
+  sourceOnly(result);
+});
+test('lock: matching caller digest still does not prove trusted provenance', () => {
+  const raw = read('source-lock.json');
+  const result = inspectExternallyAnchoredLock(raw, crypto.createHash('sha256').update(raw).digest('hex'), sources());
+  assert.equal(result.status, 'SOURCE_LOCK_MATCHES_EXTERNAL_DIGEST_ONLY');
+  assert.equal(result.externalAnchorProven, false);
+  sourceOnly(result);
+});
 test('preflight: exact source is prepared only, not passed', () => {
   const result = inspectCandidatePreflight(...inputs());
   assert.equal(result.status, 'CANDIDATE_SOURCE_PREPARED_ONLY');
@@ -163,4 +200,21 @@ test('preflight: malformed error catalog is rejected', () => {
   const result = inspectCandidatePreflight(...args);
   assert(result.findings.some((f) => f.code === 'ERROR_CATALOG_INVALID'));
   sourceOnly(result);
+});
+test('change scope: candidate files are allowed without granting authority', () => {
+  const result = inspectChangedPaths(['nohands.yml', 'merge-gate-install/required-check.yml.example',
+    '.github/workflows/merge-gate-candidate-qa.yml']);
+  assert.equal(result.status, 'CANDIDATE_CHANGE_SCOPE_ONLY');
+  assert.equal(result.activationAllowed, false);
+  assert.equal(result.trusted, false);
+});
+test('change scope: unrelated workflows and files reject', () => {
+  const result = inspectChangedPaths(['.github/workflows/other.yml', 'src/payload.cjs']);
+  assert.equal(result.status, 'CANDIDATE_CHANGE_SCOPE_REJECTED');
+  assert.equal(result.findings.length, 2);
+});
+test('change scope: traversal and empty diff reject', () => {
+  assert.equal(inspectChangedPaths(['merge-gate-install/../src/x']).status,
+    'CANDIDATE_CHANGE_SCOPE_REJECTED');
+  assert.equal(inspectChangedPaths([]).status, 'CANDIDATE_CHANGE_SCOPE_REJECTED');
 });

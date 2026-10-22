@@ -26,6 +26,7 @@ const MANAGED_PATHS = Object.freeze([
   'merge-gate-install/candidate/DELIVERY.md',
 ]);
 const SHA1 = /^[0-9a-f]{40}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 
 function gitBlobSha1(bytes) {
   const content = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, 'utf8');
@@ -118,6 +119,35 @@ function inspectSourceLock(lock, sources) {
   return result;
 }
 
+// Expected SHA-256 MUST originate outside the candidate-controlled branch
+// (e.g. a separately reviewed immutable policy commit or signed manifest).
+// Neither this function nor the branch-local CI can establish that provenance.
+// This method is an anchor-verification primitive, NEVER an authority grant.
+function inspectExternallyAnchoredLock(rawLockBytes, expectedSha256, sources) {
+  const rejected = (code) => ({
+    status: 'SOURCE_LOCK_REJECTED', trusted: false, activationAllowed: false,
+    hostedCheckEvidence: 'NOT_VERIFIED',
+    findings: [{ code, detail: 'Independent lock anchor unavailable or mismatched.' }],
+  });
+  if ((!Buffer.isBuffer(rawLockBytes) && typeof rawLockBytes !== 'string') ||
+      typeof expectedSha256 !== 'string' || !SHA256.test(expectedSha256)) {
+    return rejected('SOURCE_LOCK_EXTERNAL_ANCHOR_UNAVAILABLE');
+  }
+  const raw = Buffer.isBuffer(rawLockBytes) ? rawLockBytes : Buffer.from(rawLockBytes, 'utf8');
+  if (raw.length === 0 || raw.length > 256_000) return rejected('SOURCE_LOCK_ANCHOR_INPUT_INVALID');
+  if (crypto.createHash('sha256').update(raw).digest('hex') !== expectedSha256) {
+    return rejected('SOURCE_LOCK_EXTERNAL_ANCHOR_MISMATCH');
+  }
+  try {
+    const result = inspectSourceLock(JSON.parse(raw.toString('utf8')), sources);
+    if (result.findings.length) return result;
+    return { ...result, status: 'SOURCE_LOCK_MATCHES_EXTERNAL_DIGEST_ONLY',
+      externalAnchorProven: false };
+  } catch (_) {
+    return rejected('SOURCE_LOCK_ANCHOR_INPUT_INVALID');
+  }
+}
+
 function main(args) {
   if (args.length !== 2) {
     process.stderr.write('Usage: node verify-source-lock.cjs <source-lock.json> <repository-root>\n');
@@ -148,7 +178,7 @@ function main(args) {
   }
 }
 
-module.exports = { gitBlobSha1, inspectSourceLock, MANAGED_PATHS };
+module.exports = { gitBlobSha1, inspectSourceLock, inspectExternallyAnchoredLock, MANAGED_PATHS };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

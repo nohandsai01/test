@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   tests:
-    name: NO HANDS Merge Gate / tests
+    name: NO HANDS Merge Gate / candidate tests (not trusted)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -25,7 +25,7 @@ jobs:
           exit 1
 
   ci:
-    name: NO HANDS Merge Gate / ci
+    name: NO HANDS Merge Gate / candidate ci (not trusted)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
