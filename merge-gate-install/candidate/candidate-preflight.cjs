@@ -12,6 +12,7 @@ const path = require('node:path');
 const { validateCandidateContract } = require('./source-contract.cjs');
 const { inspectCandidatePolicy } = require('./policy-source-binding.cjs');
 const { inspectSourceLock, MANAGED_PATHS } = require('./verify-source-lock.cjs');
+const { inspectWorkflowTemplate } = require('./workflow-source-binding.cjs');
 
 const CANDIDATE = 'merge-gate-install/candidate';
 
@@ -19,7 +20,7 @@ function validateErrorCatalog(catalog, findings) {
   const fail = (detail) => findings.push({ stage: 'catalog', code: 'ERROR_CATALOG_INVALID', detail });
   const isRecord = (value) => value !== null && typeof value === 'object' &&
     !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
-  const expectedStages = ['contract', 'policy', 'source_lock', 'input'];
+  const expectedStages = ['contract', 'policy', 'workflow_template', 'source_lock', 'input'];
   if (!isRecord(catalog) ||
       JSON.stringify(Object.keys(catalog).sort()) !== JSON.stringify([
         'schemaVersion', 'repository', 'mode', 'trusted',
@@ -54,9 +55,10 @@ function validateErrorCatalog(catalog, findings) {
 }
 
 
-function inspectCandidatePreflight(contract, policyText, sourceLock, sources, errorCatalog) {
+function inspectCandidatePreflight(contract, policyText, workflowSourceText, sourceLock, sources, errorCatalog) {
   const contractResult = validateCandidateContract(contract);
   const policyResult = inspectCandidatePolicy(contract, policyText);
+  const workflowResult = inspectWorkflowTemplate(workflowSourceText);
   const sourceLockResult = inspectSourceLock(sourceLock, sources);
 
   // Policy inspector already includes contract findings; avoid duplicates.
@@ -64,6 +66,7 @@ function inspectCandidatePreflight(contract, policyText, sourceLock, sources, er
   const findings = [
     ...contractResult.findings.map((finding) => ({ stage: 'contract', ...finding })),
     ...policyOnlyFindings.map((finding) => ({ stage: 'policy', ...finding })),
+    ...workflowResult.findings.map((finding) => ({ stage: 'workflow_template', ...finding })),
     ...sourceLockResult.findings.map((finding) => ({ stage: 'source_lock', ...finding })),
   ];
 
@@ -79,6 +82,7 @@ function inspectCandidatePreflight(contract, policyText, sourceLock, sources, er
     checks: {
       contract: contractResult.status,
       policy: policyResult.status,
+      workflowTemplate: workflowResult.status,
       sourceLock: sourceLockResult.status,
     },
     findings,
@@ -96,6 +100,7 @@ function failure(code) {
     checks: {
       contract: 'NOT_EVALUATED',
       policy: 'NOT_EVALUATED',
+      workflowTemplate: 'NOT_EVALUATED',
       sourceLock: 'NOT_EVALUATED',
     },
     findings: [{ stage: 'input', code, detail: 'Source inputs unavailable or malformed.' }],
@@ -113,6 +118,7 @@ function main(args) {
     const root = path.resolve(args[0]);
     const contract = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'source-contract.json'), 'utf8'));
     const policyText = fs.readFileSync(path.join(root, 'nohands.yml'), 'utf8');
+    const workflowSourceText = fs.readFileSync(path.join(root, CANDIDATE, 'trusted-evidence.yml.example'), 'utf8');
     const sourceLock = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'source-lock.json'), 'utf8'));
     const errorCatalog = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'error-codes.json'), 'utf8'));
     const sources = {};
@@ -120,7 +126,7 @@ function main(args) {
     for (const file of MANAGED_PATHS) {
       sources[file] = fs.readFileSync(path.join(root, file));
     }
-    result = inspectCandidatePreflight(contract, policyText, sourceLock, sources, errorCatalog);
+    result = inspectCandidatePreflight(contract, policyText, workflowSourceText, sourceLock, sources, errorCatalog);
   } catch (_) {
     result = failure('CANDIDATE_PREFLIGHT_INPUT_UNREADABLE');
   }
