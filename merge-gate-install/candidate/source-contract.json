@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "scope": {
     "repository": "nohandsai01/test",
-    "branch": "feat/merge-gate-ci-candidate-20261022",
+    "branch": "feat/merge-gate-postqa-20261022",
     "baseBranch": "main"
   },
   "mode": "SOURCE_ONLY",

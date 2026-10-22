@@ -23,7 +23,8 @@ function inspectChangedPaths(files) {
   if (!Array.isArray(files) || files.length === 0 ||
       files.some(file => typeof file !== 'string' || !file || file.startsWith('/') ||
         file.split('/').some(part => !part || part === '.' || part === '..'))) {
-    return { status: 'CANDIDATE_CHANGE_SCOPE_REJECTED', findings: ['CHANGE_SCOPE_INPUT_INVALID'] };
+    return { status: 'CANDIDATE_CHANGE_SCOPE_REJECTED', findings: ['CHANGE_SCOPE_INPUT_INVALID'],
+      trusted: false, activationAllowed: false };
   }
   const outOfScope = [...new Set(files.filter(file => !allowed(file)))].sort();
   return {
