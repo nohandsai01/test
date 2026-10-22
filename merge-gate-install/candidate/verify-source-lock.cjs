@@ -20,6 +20,7 @@ const MANAGED_PATHS = Object.freeze([
   'merge-gate-install/candidate/source-contract.json',
   'merge-gate-install/candidate/policy-source-binding.cjs',
   'merge-gate-install/candidate/verify-source-lock.cjs',
+  'merge-gate-install/candidate/candidate-preflight.cjs',
 ]);
 const SHA1 = /^[0-9a-f]{40}$/;
 
@@ -143,7 +144,7 @@ function main(args) {
   }
 }
 
-module.exports = { gitBlobSha1, inspectSourceLock };
+module.exports = { gitBlobSha1, inspectSourceLock, MANAGED_PATHS };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));
