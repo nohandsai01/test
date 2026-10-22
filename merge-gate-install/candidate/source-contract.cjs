@@ -128,7 +128,8 @@ function main(argv) {
   }
   const result = validateCandidateContract(contract);
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-  return result.findings.length ? 1 : 0;
+  // Even valid candidate source is not a successful hosted CI check.
+  return result.findings.length ? 1 : 3;
 }
 
 module.exports = { validateCandidateContract };
