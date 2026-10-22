@@ -12,6 +12,10 @@
   },
   "files": [
     {
+      "path": "merge-gate-install/candidate/candidate-preflight.cjs",
+      "gitBlobSha1": "34939737b329ee4693bb9342815683befea0089b"
+    },
+    {
       "path": "merge-gate-install/candidate/policy-source-binding.cjs",
       "gitBlobSha1": "b9dc1ad4d498174ecc0df6a5841ad5fa21c671f4"
     },
@@ -29,7 +33,7 @@
     },
     {
       "path": "merge-gate-install/candidate/verify-source-lock.cjs",
-      "gitBlobSha1": "432b68cb84c468797387a15eecf449635909c614"
+      "gitBlobSha1": "f0de1d344a8a3d93de26d4024e5f65c9f12717df"
     },
     {
       "path": "nohands.yml",
