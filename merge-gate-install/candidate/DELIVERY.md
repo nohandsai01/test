@@ -26,13 +26,23 @@ From the repository root:
 node merge-gate-install/candidate/candidate-preflight.cjs .
 ```
 
-Never configure this command as a successful hosted CI check. The program deliberately never returns exit code `0`.
+Never configure this command **or any standalone inspector** as a successful hosted CI check. All candidate CLI entry points deliberately avoid exit code `0`, even when local source bytes match. This prevents a source-only match from being mistaken for genuine hosted check evidence.
+
+The same nonzero success-equivalent rule applies to:
+
+```sh
+node merge-gate-install/candidate/source-contract.cjs merge-gate-install/candidate/source-contract.json
+node merge-gate-install/candidate/policy-source-binding.cjs merge-gate-install/candidate/source-contract.json nohands.yml
+node merge-gate-install/candidate/verify-source-lock.cjs merge-gate-install/candidate/source-lock.json .
+```
+
+These are **proposed local invocations only; none were executed**. Use the consolidated preflight for source-only handoff; do not register the individual tools as hosted required status checks.
 
 | Exit code | Meaning | Permits activation? |
 | --- | --- | --- |
 | `1` | Source input, policy, catalog or version validation failed | No |
 | `2` | Invalid command-line invocation | No |
-| `3` | Source structure matches the inert candidate; **not a CI success** | No |
+| `3` | Source structure matches the inert candidate; **not a CI success** (also applies to each standalone inspector) | No |
 
 ## Output contract
 
