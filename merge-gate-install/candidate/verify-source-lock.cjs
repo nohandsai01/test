@@ -21,6 +21,8 @@ const MANAGED_PATHS = Object.freeze([
   'merge-gate-install/candidate/policy-source-binding.cjs',
   'merge-gate-install/candidate/verify-source-lock.cjs',
   'merge-gate-install/candidate/candidate-preflight.cjs',
+  'merge-gate-install/candidate/error-codes.json',
+  'merge-gate-install/candidate/DELIVERY.md',
 ]);
 const SHA1 = /^[0-9a-f]{40}$/;
 
