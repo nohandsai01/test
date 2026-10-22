@@ -19,6 +19,7 @@ const MANAGED_PATHS = Object.freeze([
   'merge-gate-install/candidate/source-contract.cjs',
   'merge-gate-install/candidate/source-contract.json',
   'merge-gate-install/candidate/policy-source-binding.cjs',
+  'merge-gate-install/candidate/workflow-source-binding.cjs',
   'merge-gate-install/candidate/verify-source-lock.cjs',
   'merge-gate-install/candidate/candidate-preflight.cjs',
   'merge-gate-install/candidate/error-codes.json',
