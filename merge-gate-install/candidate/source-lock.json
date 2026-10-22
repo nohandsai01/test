@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "repository": "nohandsai01/test",
+  "branch": "feat/merge-gate-ci-candidate-20261022",
+  "mode": "SOURCE_ONLY",
+  "gitObjectFormat": "sha1",
+  "activation": {
+    "workflowInstalled": false,
+    "issuerApproved": false,
+    "branchChecksConfigured": false,
+    "featureEnabled": false
+  },
+  "files": [
+    {
+      "path": "merge-gate-install/candidate/policy-source-binding.cjs",
+      "gitBlobSha1": "b9dc1ad4d498174ecc0df6a5841ad5fa21c671f4"
+    },
+    {
+      "path": "merge-gate-install/candidate/source-contract.cjs",
+      "gitBlobSha1": "2677301ba99905cca66bb95bc49f1d5caf6d3b83"
+    },
+    {
+      "path": "merge-gate-install/candidate/source-contract.json",
+      "gitBlobSha1": "ea032337fd670628d91116cf9d256dc6e1359b63"
+    },
+    {
+      "path": "merge-gate-install/candidate/trusted-evidence.yml.example",
+      "gitBlobSha1": "38a61c60c0a87da8850f112a1c8e73f71548d89f"
+    },
+    {
+      "path": "merge-gate-install/candidate/verify-source-lock.cjs",
+      "gitBlobSha1": "432b68cb84c468797387a15eecf449635909c614"
+    },
+    {
+      "path": "nohands.yml",
+      "gitBlobSha1": "36fab822eaa544057ec3d0248b5d28a21cfb253d"
+    }
+  ]
+}
