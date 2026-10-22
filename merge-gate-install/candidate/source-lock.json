@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "repository": "nohandsai01/test",
+  "branch": "feat/merge-gate-ci-candidate-20261022",
+  "mode": "SOURCE_ONLY",
+  "gitObjectFormat": "sha1",
+  "activation": {
+    "workflowInstalled": false,
+    "issuerApproved": false,
+    "branchChecksConfigured": false,
+    "featureEnabled": false
+  },
+  "files": [
+    {
+      "path": "merge-gate-install/candidate/candidate-preflight.cjs",
+      "gitBlobSha1": "0780451b99c68712bcaac2ab836cf0694af044f5"
+    },
+    {
+      "path": "merge-gate-install/candidate/DELIVERY.md",
+      "gitBlobSha1": "58291278e7921b1cf094d2690c5d02f82403ac48"
+    },
+    {
+      "path": "merge-gate-install/candidate/error-codes.json",
+      "gitBlobSha1": "17613ecb66d4500e5d052d443f93ed166f1ac853"
+    },
+    {
+      "path": "merge-gate-install/candidate/policy-source-binding.cjs",
+      "gitBlobSha1": "9ef731052733b5f85467beaf4bf6f495305e7e43"
+    },
+    {
+      "path": "merge-gate-install/candidate/source-contract.cjs",
+      "gitBlobSha1": "0406de4819f95fb16424b62c583b03646062c0a3"
+    },
+    {
+      "path": "merge-gate-install/candidate/source-contract.json",
+      "gitBlobSha1": "30d81339e0f4a22446fd35cfa2cd1ff37113c40d"
+    },
+    {
+      "path": "merge-gate-install/candidate/trusted-evidence.yml.example",
+      "gitBlobSha1": "1861eeae21607ec551fdf602df4352602dd7d2c4"
+    },
+    {
+      "path": "merge-gate-install/candidate/verify-source-lock.cjs",
+      "gitBlobSha1": "d7bee0f76c4eb4ec752e18b01270749a831b9d60"
+    },
+    {
+      "path": "merge-gate-install/candidate/workflow-source-binding.cjs",
+      "gitBlobSha1": "d4a1f73bb1c86f3aac5416a1218d18036652bbc4"
+    },
+    {
+      "path": "nohands.yml",
+      "gitBlobSha1": "36fab822eaa544057ec3d0248b5d28a21cfb253d"
+    }
+  ]
+}
