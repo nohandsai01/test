@@ -10,6 +10,8 @@ const { parseUniqueKeySourceLock } = require('../candidate/verify-source-lock.cj
 const { readAndEvaluateGuardianCandidate } = require('./read-and-evaluate.cjs');
 const { mintScopedInstallationToken, postFailureOnlyCheck } =
   require('./github-app-identity.cjs');
+const { fetchIndependentlySignedPolicy, GuardianPolicySourceError } =
+  require('./independent-policy-source.cjs');
 
 const REPO = 'nohandsai01/test';
 const SHA = /^[0-9a-f]{40}$/;
@@ -83,9 +85,12 @@ function verifyWebhook({ rawBody, headers, webhookSecret, trustedInstallationId 
 
 /**
  * Expected host contracts:
- * - `deliveryStore.reserveOnce(id)` is atomic and durable across replicas;
- * - `getSignedPolicyEnvelope({pullNumber,headSha})` is independent of PR content;
- * - App key, webhook secret and policy public key are protected host secrets.
+ * - `deliveryStore.reserveOnce(id, scope)` is atomic and durable across replicas;
+ * - `installationStore.getVerifiedBinding(id)` only reads bindings written
+ *   after GitHub App + GitHub owner identity/API verification;
+ * - `policyAuthority` hostname, Ed25519 key and SPKI fingerprint are owner
+ *   trust configuration, independently administered and never PR-derived;
+ * - App key, webhook secret and owner account/repository IDs are host secrets.
  * A missing host dependency always HOLDS, never becomes an in-memory fallback.
  */
 async function processGuardianDelivery({ rawBody, headers, host }) {
@@ -99,20 +104,52 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
     return hold('FEATURE_OFF', { deliveryId: parsed.deliveryId });
   }
   if (!host.deliveryStore || typeof host.deliveryStore.reserveOnce !== 'function' ||
-      typeof host.getSignedPolicyEnvelope !== 'function' ||
+      !host.installationStore ||
+      typeof host.installationStore.getVerifiedBinding !== 'function' ||
+      !record(host.policyAuthority) ||
       !Number.isSafeInteger(host.guardianAppId) || host.guardianAppId <= 0 ||
-      typeof host.trustedPolicyPublicKeyPem !== 'string' ||
+      !Number.isSafeInteger(host.expectedOwnerAccountId) ||
+      host.expectedOwnerAccountId <= 0 ||
+      !Number.isSafeInteger(host.expectedRepositoryId) ||
+      host.expectedRepositoryId <= 0 ||
       typeof host.githubAppPrivateKeyPem !== 'string') {
     return hold('HOST_TRUST_OR_DURABLE_REPLAY_STORE_MISSING');
+  }
+
+  let binding;
+  try {
+    binding = await host.installationStore.getVerifiedBinding(parsed.installationId);
+  } catch (_) { return hold('INSTALLATION_BINDING_READ_FAILED'); }
+  if (!record(binding) || binding.installationId !== parsed.installationId ||
+      binding.appId !== host.guardianAppId ||
+      binding.ownerAccountId !== host.expectedOwnerAccountId ||
+      binding.repositoryId !== host.expectedRepositoryId) {
+    return hold('INSTALLATION_BINDING_NOT_VERIFIED');
   }
 
   // Never process the same delivery on two host replicas. A failed durable
   // reservation may require trusted manual reconciliation, not local retry.
   try {
-    if (await host.deliveryStore.reserveOnce(parsed.deliveryId) !== true) {
+    if (await host.deliveryStore.reserveOnce(parsed.deliveryId, {
+      installationId: parsed.installationId,
+      pullNumber: parsed.pullNumber,
+      headSha: parsed.headSha,
+    }) !== true) {
       return hold('DELIVERY_DUPLICATE_OR_NOT_RESERVED');
     }
   } catch (_) { return hold('DELIVERY_REPLAY_STORE_FAILED'); }
+
+  let policy;
+  let policyFailure;
+  try {
+    policy = await fetchIndependentlySignedPolicy({
+      authority: host.policyAuthority,
+      pullNumber: parsed.pullNumber, headSha: parsed.headSha,
+    });
+  } catch (error) {
+    policyFailure = error instanceof GuardianPolicySourceError ?
+      error.code : 'INDEPENDENT_POLICY_SOURCE_FAILED';
+  }
 
   let installationToken;
   try {
@@ -120,21 +157,21 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
       appId: host.guardianAppId,
       installationId: parsed.installationId,
       privateKeyPem: host.githubAppPrivateKeyPem,
+      expectedRepositoryId: host.expectedRepositoryId,
     });
   } catch (_) { return hold('GITHUB_APP_INSTALLATION_TOKEN_UNAVAILABLE'); }
 
-  let evidence = hold('SIGNED_POLICY_UNAVAILABLE');
-  try {
-    const policy = await host.getSignedPolicyEnvelope({
-      pullNumber: parsed.pullNumber, headSha: parsed.headSha,
-    });
-    evidence = await readAndEvaluateGuardianCandidate({
-      pullNumber: parsed.pullNumber,
-      signedPolicyEnvelope: policy,
-      trustedPolicyPublicKeyPem: host.trustedPolicyPublicKeyPem,
-      githubAppInstallationToken: installationToken.token,
-    });
-  } catch (_) { evidence = hold('GUARDIAN_EVIDENCE_READ_FAILED'); }
+  let evidence = hold(policyFailure || 'INDEPENDENT_POLICY_UNAVAILABLE');
+  if (policy) {
+    try {
+      evidence = await readAndEvaluateGuardianCandidate({
+        pullNumber: parsed.pullNumber,
+        signedPolicyEnvelope: policy.envelope,
+        trustedPolicyPublicKeyPem: policy.publicKeyPem,
+        githubAppInstallationToken: installationToken.token,
+      });
+    } catch (_) { evidence = hold('GUARDIAN_EVIDENCE_READ_FAILED'); }
+  }
   // This code must never silently grow a success path. The only check-run
   // endpoint invocation is hardwired to conclusion=failure.
   const reason = typeof evidence.reason === 'string' &&

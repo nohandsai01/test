@@ -6,6 +6,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { verifyOwnerInstallationBinding } =
+  require('./github-app-identity.cjs');
 
 function hold(reason) {
   return { status: 'INSTALLATION_HOLD', reason, installed: false,
@@ -42,12 +44,13 @@ async function beginGuardianInstallation({ appSlug, verifiedOwnerSessionId, inte
 
 /**
  * Setup redirects are user-controlled HTTP requests, including installation_id.
- * Even a matching single-use state never establishes the installer owns this
- * installation; a verified GitHub user identity + App installation API binding
- * must be added by an independently administered onboarding host.
+ * Even a matching single-use state never establishes ownership. A protected
+ * onboarding host must OAuth-bind the user access token to the verified owner
+ * session and supply a pinned numeric GitHub account ID from outside PR code.
  */
 async function consumeGuardianSetupIntent({ state, installationId, setupAction,
-  verifiedOwnerSessionId, intentStore }) {
+  verifiedOwnerSessionId, intentStore, installationStore, appId, privateKeyPem,
+  ownerUserAccessToken, expectedOwnerAccountId }) {
   if (typeof state !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(state) ||
       !Number.isSafeInteger(installationId) || installationId <= 0 ||
       !['install', 'update'].includes(setupAction) ||
@@ -62,10 +65,31 @@ async function consumeGuardianSetupIntent({ state, installationId, setupAction,
     });
     if (used !== true) return hold('SETUP_STATE_MISMATCH_EXPIRED_OR_REPLAYED');
   } catch (_) { return hold('SETUP_STATE_STORE_FAILURE'); }
+  if (!installationStore || typeof installationStore.bindVerifiedOnce !== 'function') {
+    return hold('INSTALLATION_BINDING_STORE_UNAVAILABLE');
+  }
+  let binding;
+  try {
+    binding = await verifyOwnerInstallationBinding({
+      installationId, appId, privateKeyPem, ownerUserAccessToken,
+      expectedOwnerAccountId,
+    });
+  } catch (_) {
+    return hold('GITHUB_OWNER_INSTALLATION_BINDING_NOT_VERIFIED');
+  }
+  try {
+    if (await installationStore.bindVerifiedOnce(binding) !== true) {
+      return hold('INSTALLATION_ALREADY_BOUND_OR_WRITE_UNCONFIRMED');
+    }
+  } catch (_) { return hold('INSTALLATION_BINDING_STORE_FAILURE'); }
   return {
-    ...hold('AWAITING_INDEPENDENT_GITHUB_INSTALLER_AND_REPO_VERIFICATION'),
-    claimedInstallationId: installationId,
-    nextRequired: 'GITHUB_USER_ACCESS_TOKEN_AND_INSTALLATION_OWNERSHIP_BINDING',
+    status: 'INSTALLATION_VERIFIED_NOT_ACTIVATED',
+    installationId: binding.installationId,
+    appId: binding.appId,
+    ownerAccountId: binding.ownerAccountId,
+    repositoryId: binding.repositoryId,
+    accountVerified: true, installed: true, activated: false,
+    releaseAuthority: 'NOT_ISSUED',
   };
 }
 
