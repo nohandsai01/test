@@ -15,7 +15,46 @@ const { inspectSourceLock, MANAGED_PATHS } = require('./verify-source-lock.cjs')
 
 const CANDIDATE = 'merge-gate-install/candidate';
 
-function inspectCandidatePreflight(contract, policyText, sourceLock, sources) {
+function validateErrorCatalog(catalog, findings) {
+  const fail = (detail) => findings.push({ stage: 'catalog', code: 'ERROR_CATALOG_INVALID', detail });
+  const isRecord = (value) => value !== null && typeof value === 'object' &&
+    !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+  const expectedStages = ['contract', 'policy', 'source_lock', 'input'];
+  if (!isRecord(catalog) ||
+      JSON.stringify(Object.keys(catalog).sort()) !== JSON.stringify([
+        'schemaVersion', 'repository', 'mode', 'trusted',
+        'activationAllowed', 'hostedCheckEvidence', 'stages',
+      ].sort()) ||
+      catalog.schemaVersion !== 1 || catalog.repository !== 'nohandsai01/test' ||
+      catalog.mode !== 'SOURCE_ONLY' || catalog.trusted !== false ||
+      catalog.activationAllowed !== false || catalog.hostedCheckEvidence !== 'NOT_VERIFIED' ||
+      !isRecord(catalog.stages) ||
+      JSON.stringify(Object.keys(catalog.stages).sort()) !== JSON.stringify(expectedStages.sort())) {
+    fail('Catalog schema, source-only scope, or stage set does not match.');
+    return;
+  }
+  for (const stage of expectedStages) {
+    const codes = catalog.stages[stage];
+    if (!Array.isArray(codes) || !codes.length ||
+        codes.some((code) => typeof code !== 'string' || !/^[A-Z][A-Z0-9_]+$/.test(code)) ||
+        new Set(codes).size !== codes.length) {
+      fail('Invalid or duplicate catalog codes in ' + stage + '.');
+      return;
+    }
+  }
+  for (const finding of [...findings]) {
+    if (!catalog.stages[finding.stage]?.includes(finding.code)) {
+      findings.push({
+        stage: 'catalog',
+        code: 'ERROR_CATALOG_UNMAPPED_CODE',
+        detail: finding.stage + ':' + finding.code,
+      });
+    }
+  }
+}
+
+
+function inspectCandidatePreflight(contract, policyText, sourceLock, sources, errorCatalog) {
   const contractResult = validateCandidateContract(contract);
   const policyResult = inspectCandidatePolicy(contract, policyText);
   const sourceLockResult = inspectSourceLock(sourceLock, sources);
@@ -28,7 +67,10 @@ function inspectCandidatePreflight(contract, policyText, sourceLock, sources) {
     ...sourceLockResult.findings.map((finding) => ({ stage: 'source_lock', ...finding })),
   ];
 
+  validateErrorCatalog(errorCatalog, findings);
+
   return {
+    errorCodeSchemaVersion: 1,
     status: findings.length ? 'CANDIDATE_SOURCE_REJECTED' : 'CANDIDATE_SOURCE_PREPARED_ONLY',
     mode: 'SOURCE_ONLY',
     trusted: false,
@@ -45,6 +87,7 @@ function inspectCandidatePreflight(contract, policyText, sourceLock, sources) {
 
 function failure(code) {
   return {
+    errorCodeSchemaVersion: 1,
     status: 'CANDIDATE_SOURCE_REJECTED',
     mode: 'SOURCE_ONLY',
     trusted: false,
@@ -71,12 +114,13 @@ function main(args) {
     const contract = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'source-contract.json'), 'utf8'));
     const policyText = fs.readFileSync(path.join(root, 'nohands.yml'), 'utf8');
     const sourceLock = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'source-lock.json'), 'utf8'));
+    const errorCatalog = JSON.parse(fs.readFileSync(path.join(root, CANDIDATE, 'error-codes.json'), 'utf8'));
     const sources = {};
     // This list is owned by the lock verifier, never by untrusted manifest entries.
     for (const file of MANAGED_PATHS) {
       sources[file] = fs.readFileSync(path.join(root, file));
     }
-    result = inspectCandidatePreflight(contract, policyText, sourceLock, sources);
+    result = inspectCandidatePreflight(contract, policyText, sourceLock, sources, errorCatalog);
   } catch (_) {
     result = failure('CANDIDATE_PREFLIGHT_INPUT_UNREADABLE');
   }
