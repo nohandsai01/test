@@ -133,7 +133,8 @@ function main(args) {
     }
     const result = inspectSourceLock(lock, Object.assign({}, sources));
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-    return result.findings.length ? 1 : 0;
+    // Matching bytes alone are not hosted CI evidence: never exit 0.
+    return result.findings.length ? 1 : 3;
   } catch (_) {
     process.stdout.write(JSON.stringify({
       status: 'SOURCE_LOCK_REJECTED',
