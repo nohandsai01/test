@@ -27,9 +27,14 @@ function encodeBase64Url(value) {
 
 /** Only hardcoded paths may be used. Redirects, proxies and arbitrary URLs are unsupported. */
 function githubJson(method, path, authorization, body) {
-  assert(['GET', 'POST'].includes(method) && typeof path === 'string' &&
+  const permitted = (method === 'POST' &&
     (path === '/repos/nohandsai01/test/check-runs' ||
-      /^\/app\/installations\/[1-9]\d*\/access_tokens$/.test(path)),
+      /^\/app\/installations\/[1-9]\d*\/access_tokens$/.test(path))) ||
+    (method === 'GET' &&
+      (path === '/user' || path === '/repos/nohandsai01/test' ||
+        path === '/repos/nohandsai01/test/installation' ||
+        /^\/app\/installations\/[1-9]\d*$/.test(path)));
+  assert(permitted && typeof path === 'string',
   'GUARDIAN_GITHUB_PATH_FORBIDDEN');
   assert(typeof authorization === 'string' && authorization.length > 8 &&
     authorization.length < 5000 && /^[\x21-\x7e]+$/.test(authorization),
@@ -85,6 +90,62 @@ function githubJson(method, path, authorization, body) {
   });
 }
 
+/**
+ * Validate a claimed setup installation against GitHub identities, not the
+ * untrusted redirect parameters. The user token MUST be bound to the same
+ * protected owner session by the external OAuth host before calling.
+ */
+async function verifyOwnerInstallationBinding({ appId, installationId,
+  privateKeyPem, ownerUserAccessToken, expectedOwnerAccountId }) {
+  assert(Number.isSafeInteger(installationId) && installationId > 0 &&
+    Number.isSafeInteger(expectedOwnerAccountId) && expectedOwnerAccountId > 0 &&
+    typeof ownerUserAccessToken === 'string' &&
+    ownerUserAccessToken.length >= 16 && ownerUserAccessToken.length <= 4096,
+  'GUARDIAN_BINDING_INPUT_INVALID');
+  const jwt = createAppJwt({ appId, privateKeyPem });
+  // Each endpoint is pinned and authenticated. A redirect is NOT followed.
+  const user = await githubJson('GET', '/user', ownerUserAccessToken);
+  const installation = await githubJson('GET',
+    '/app/installations/' + installationId, jwt);
+  const repoInstallation = await githubJson('GET',
+    '/repos/nohandsai01/test/installation', jwt);
+  const repository = await githubJson('GET',
+    '/repos/nohandsai01/test', ownerUserAccessToken);
+  const owner = (entry) => isRecord(entry) && isRecord(entry.account) &&
+    entry.account.id === expectedOwnerAccountId &&
+    entry.account.login === 'nohandsai01' &&
+    entry.target_id === expectedOwnerAccountId &&
+    entry.target_type === 'User';
+  assert(user.id === expectedOwnerAccountId &&
+    user.login === 'nohandsai01' && user.type === 'User' &&
+    installation.id === installationId &&
+    installation.app_id === appId && owner(installation) &&
+    installation.repository_selection === 'selected' &&
+    installation.suspended_at === null &&
+    isRecord(installation.permissions) &&
+    installation.permissions.checks === 'write' &&
+    installation.permissions.pull_requests === 'read' &&
+    Array.isArray(installation.events) &&
+    installation.events.includes('pull_request') &&
+    repoInstallation.id === installationId &&
+    repoInstallation.app_id === appId && owner(repoInstallation) &&
+    repoInstallation.repository_selection === 'selected' &&
+    repoInstallation.suspended_at === null &&
+    isRecord(repository.owner) &&
+    repository.full_name === 'nohandsai01/test' &&
+    repository.owner.id === expectedOwnerAccountId &&
+    repository.owner.login === 'nohandsai01' &&
+    Number.isSafeInteger(repository.id) && repository.id > 0,
+  'GUARDIAN_INSTALLATION_OWNER_OR_REPO_UNVERIFIED');
+  return Object.freeze({
+    installationId, appId, ownerAccountId: expectedOwnerAccountId,
+    repositoryId: repository.id,
+    repository: 'nohandsai01/test',
+    verifiedAt: new Date().toISOString(),
+    activated: false,
+  });
+}
+
 function createAppJwt({ appId, privateKeyPem, now = Date.now() }) {
   assert(Number.isSafeInteger(appId) && appId > 0 && typeof privateKeyPem === 'string' &&
     privateKeyPem.length > 100 && privateKeyPem.length < 20_000 &&
@@ -101,9 +162,12 @@ function createAppJwt({ appId, privateKeyPem, now = Date.now() }) {
 }
 
 /** Token never leaves the trusted host except as an Authorization header. */
-async function mintScopedInstallationToken({ appId, installationId, privateKeyPem }) {
+async function mintScopedInstallationToken({ appId, installationId, privateKeyPem,
+  expectedRepositoryId }) {
   assert(Number.isSafeInteger(installationId) && installationId > 0,
     'GUARDIAN_INSTALLATION_ID_INVALID');
+  assert(Number.isSafeInteger(expectedRepositoryId) && expectedRepositoryId > 0,
+    'GUARDIAN_REPOSITORY_ID_UNVERIFIED');
   const jwt = createAppJwt({ appId, privateKeyPem });
   // Explicit repository and least-privilege permission intersection.
   const response = await githubJson('POST', '/app/installations/' + installationId +
@@ -119,6 +183,7 @@ async function mintScopedInstallationToken({ appId, installationId, privateKeyPe
     Array.isArray(response.repositories) && response.repositories.length === 1 &&
     isRecord(response.repositories[0]) &&
     response.repositories[0].full_name === 'nohandsai01/test' &&
+    response.repositories[0].id === expectedRepositoryId &&
     response.repository_selection === 'selected',
   'GUARDIAN_SCOPED_TOKEN_UNVERIFIED');
   return { token: response.token, expiresAt: response.expires_at,
@@ -144,4 +209,4 @@ async function postFailureOnlyCheck({ token, headSha, summary }) {
 }
 
 module.exports = { createAppJwt, mintScopedInstallationToken,
-  postFailureOnlyCheck, GuardianApiError };
+  postFailureOnlyCheck, verifyOwnerInstallationBinding, GuardianApiError };

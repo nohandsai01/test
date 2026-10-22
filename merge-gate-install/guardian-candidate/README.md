@@ -114,23 +114,33 @@ deploy** a Guardian GitHub App:
 
 | File | Source-only implementation | Critical limitation |
 | --- | --- | --- |
-| `github-app-identity.cjs` | Signs short-lived RS256 App JWTs; exchanges one owner-configured installation ID for a repository-scoped installation token; provides a **failure-only** `POST /check-runs` function | Requires separately protected App ID/RSA private key, valid installation, `checks:write`, `pull_requests:read`; no `success` writer |
-| `guardian-webhook-runtime.cjs` | Validates raw webhook HMAC SHA-256, event/repository/base/installation, atomic delivery reservation; obtains independently signed policy, invokes source evaluator, and can publish a **failure** check | Host must independently provide webhook secret, trust anchor, signed policy, and durable cross-replica replay store; default OFF |
-| `github-app-onboarding.cjs` | Issues a 256-bit state-bound GitHub installation link and consumes a stored single-use setup intent | GitHub explicitly warns that `installation_id` in a setup redirect is spoofable. Returned state is **NOT** account/installation proof. Separate GitHub user authorization and ownership verification remain necessary |
+| `github-app-identity.cjs` | Signs short-lived RS256 App JWTs; cross-checks GitHub `/user`, App installation, repository installation and repository identity; exchanges a verified installation ID for a repository-ID-scoped token; provides a **failure-only** `POST /check-runs` function | Requires separately protected App ID/RSA private key, OAuth session-bound owner token and numeric GitHub owner/repository IDs; no `success` writer |
+| `guardian-webhook-runtime.cjs` | Validates webhook HMAC, event and installation; checks durable verified installation binding; reserves the delivery across replicas before any outbound request; fetches an independently signed policy and can publish a **failure** check | Host must supply verified binding, independent policy authority and durable replay store; default OFF |
+| `github-app-onboarding.cjs` | Issues a 256-bit state-bound GitHub installation link; consumes a durable one-time intent; calls GitHub REST to verify the owner, App installation and repository before storing a verified binding | Redirect `installation_id` remains untrusted until API verification. OAuth token-to-owner-session binding must occur in the protected host |
+| `guardian-d1-stores.cjs` / `guardian-d1-schema.sql` | D1-backed single-use setup intent, immutable installation-binding reservation, permanent webhook-delivery replay tombstones | SQL schema must be applied to an isolated owner-managed D1 separately; no migration or provisioning is performed here |
+| `independent-policy-source.cjs` | Fetches a bounded policy envelope from a fixed HTTPS host and verifies Ed25519 signature against a pinned SPKI fingerprint and exact PR head | Operational separation of the signing authority must be evidenced externally; source cannot certify it |
 | `guardian-http-server.cjs` | Creates an HTTP `/github/webhook` handler and `/healthz` entry point with body and timeout bounds | `createGuardianHttpServer` does **not** call `.listen()`; needs owner-controlled host, TLS termination and operational controls |
 
 ### External runtime integration contract — inert by default
 
 ```js
 const { createGuardianHttpServer } = require('./guardian-http-server.cjs');
+const { createGuardianD1Stores } = require('./guardian-d1-stores.cjs');
+const stores = createGuardianD1Stores(protectedIsolatedGuardianD1Binding);
 const server = createGuardianHttpServer({ host: {
   webhookSecret: protectedWebhookSecret,
   trustedInstallationId: ownerApprovedInstallationId,
   guardianAppId: ownerApprovedGuardianAppId,
+  expectedOwnerAccountId: pinnedGitHubOwnerNumericId,
+  expectedRepositoryId: pinnedGitHubRepositoryNumericId,
   githubAppPrivateKeyPem: protectedAppRsaKey,
-  trustedPolicyPublicKeyPem: protectedIndependentEd25519PublicKey,
-  deliveryStore: durableStoreWithAtomicReserveOnce,
-  getSignedPolicyEnvelope: independentPolicyProvider,
+  installationStore: stores.installationStore,
+  deliveryStore: stores.deliveryStore,
+  policyAuthority: {
+    hostname: ownerConfiguredIndependentPolicyHostname,
+    publicKeyPem: protectedIndependentEd25519PublicKey,
+    pinnedSpkiSha256: pinnedIndependentEd25519SpkiFingerprint,
+  },
   enableFailureCheckWrites: false,
   founderAuthorizedFailureOnly: null,
 } });
@@ -139,7 +149,7 @@ const server = createGuardianHttpServer({ host: {
 
 Both opt-ins (`enableFailureCheckWrites === true` and an explicit host-owned
 `founderAuthorizedFailureOnly === 'EXPLICIT_FAILURE_ONLY'`) plus verified
-HMAC, exact installation, durable replay reservation and installation token
+HMAC, GitHub-API-verified installation binding, durable replay reservation and installation token
 are required before source code can even *attempt* a failure check. The token
 minting request scopes access to `nohandsai01/test` and `checks:write` plus
 `pull_requests:read`. In no configuration does this code issue `success`,
@@ -151,6 +161,41 @@ Neither a successful signed policy shape match nor a successful failure-only
 check proves last-push timing, reviewer provenance, branch protection binding,
 or an owner-authorized product launch. The policy source is external, not a
 PR-authored configuration file.
+
+### G6 integration contract — three protections in one batch
+
+1. **GitHub App identity binding.** The setup callback consumes a 10-minute,
+   single-use owner-session state, then reads GitHub's authenticated `/user`,
+   `/app/installations/{installation_id}`,
+   `/repos/nohandsai01/test/installation` and
+   `/repos/nohandsai01/test` endpoints. The resulting binding contains the
+   numeric App, installation, owner and repository IDs. A GitHub App user
+   access token must first be cryptographically bound to the same verified
+   owner browser session by a separately operated OAuth host. This source
+   implements API cross-checks, **not** that host's OAuth callback.
+2. **Independent permission decision.** The delivery host only fetches a
+   signed policy from an owner-pinned HTTPS hostname with an independently
+   pinned Ed25519 SPKI SHA-256 fingerprint. The signature and exact head are
+   verified before the evidence evaluator runs. The protected host must
+   demonstrate separate administrators and signing-key custody outside this
+   repository. An independently signed policy is still **not** a merge or
+   launch authorization. No PR-authored policy can override the host.
+3. **Persistent replay prevention.** `createGuardianD1Stores(db)` supplies
+   atomic D1 `INSERT OR IGNORE` / guarded `UPDATE` operations backed by
+   primary keys. Setup state is consumed once; one installation binding is
+   reserved once; every webhook delivery ID receives a permanent SHA-256
+   tombstone before external calls. Database errors, duplicate reservations
+   and uncertain writes fail closed. `guardian-d1-schema.sql` is a proposed
+   schema only: the source does not create a Cloudflare resource, run a
+   migration, erase tombstones, or provide in-memory replay fallback.
+
+The owner host must separately create the isolated D1, apply and review the
+schema, protect credentials, bind OAuth user tokens to sessions, attest policy
+authority independence and provide a revocation/rebinding process. The
+verified binding is not an invitation to turn the feature on. D1 is **not**
+configured, and this batch does not call `.listen()`, perform live payments,
+submit installation requests or run tests. The only possible host-written
+Check Run remains a Founder-opted-in **failure**; there is no PASS writer.
 
 Source-only integration still needs the independently operated service host,
 registered GitHub App identity, verified installer account binding, durable
