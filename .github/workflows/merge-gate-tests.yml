@@ -1,0 +1,39 @@
+# STAGED: not an approved or required Merge Gate check issuer.
+# Workflow-only delivery does not match the path filter; no tests run on push.
+name: NO HANDS Merge Gate Tests (staged)
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: NO HANDS Merge Gate / Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Require committed test cases and execute them
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! compgen -G 'test/*.test.cjs' > /dev/null; then
+            echo '::error::No committed test/*.test.cjs; rejecting empty green evidence.'
+            exit 1
+          fi
+          node --test test/*.test.cjs
