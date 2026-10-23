@@ -182,6 +182,18 @@ function createGuardianD1Stores(db) {
           [sha256(deliveryId.toLowerCase()), installationId, pullNumber, headSha])) === 1;
       },
     }),
+    conclusionStore: Object.freeze({
+      async reserveOnce({ repositoryId, pullNumber, headSha, deliveryId }) {
+        assert(positiveInteger(repositoryId) && positiveInteger(pullNumber) &&
+          SHA.test(headSha) && DELIVERY.test(deliveryId),
+        'GUARDIAN_CONCLUSION_RESERVATION_INVALID');
+        return (await run(db,
+          'INSERT OR IGNORE INTO guardian_conclusion_reservations ' +
+          '(repository_id, pull_number, head_sha, delivery_hash) ' +
+          'VALUES (?, ?, ?, ?)',
+          [repositoryId, pullNumber, headSha, sha256(deliveryId.toLowerCase())])) === 1;
+      },
+    }),
   });
 }
 

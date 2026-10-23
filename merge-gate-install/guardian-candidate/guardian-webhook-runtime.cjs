@@ -1,15 +1,19 @@
 /**
  * Inert webhook orchestration for an independently hosted Guardian GitHub App.
  * Importing this module opens no ports and makes no network calls. Even when
- * explicitly enabled later, it only creates FAILURE check runs, never PASS.
+ * Default OFF. Full SUCCESS/FAILURE mode is a separate, explicit host opt-in
+ * requiring independent signed policy, review/workflow/ruleset provenance.
  */
 'use strict';
 
 const crypto = require('node:crypto');
 const { parseUniqueKeySourceLock } = require('../candidate/verify-source-lock.cjs');
 const { readAndEvaluateGuardianCandidate } = require('./read-and-evaluate.cjs');
-const { mintScopedInstallationToken, postFailureOnlyCheck } =
+const { mintScopedInstallationToken, postFailureOnlyCheck,
+  postConclusiveSuccessCheck,
+  revalidateCurrentInstallationScope } =
   require('./github-app-identity.cjs');
+const { verifySignedPolicy } = require('./signed-policy.cjs');
 const { fetchIndependentlySignedPolicy, GuardianPolicySourceError } =
   require('./independent-policy-source.cjs');
 
@@ -20,6 +24,7 @@ const ALLOWED_ACTIONS = new Set([
   'opened', 'reopened', 'synchronize', 'ready_for_review',
   'converted_to_draft', 'edited',
 ]);
+const REVIEW_ACTIONS = new Set(['submitted', 'dismissed', 'edited']);
 const MAX_WEBHOOK_BYTES = 256_000;
 
 function hold(reason, additional = {}) {
@@ -56,31 +61,48 @@ function verifyWebhook({ rawBody, headers, webhookSecret, trustedInstallationId 
   }
   const event = header(headers, 'x-github-event');
   const deliveryId = header(headers, 'x-github-delivery');
-  if (event !== 'pull_request' || !DELIVERY.test(deliveryId || '')) {
+  if (!['pull_request', 'pull_request_review', 'workflow_run'].includes(event) ||
+      !DELIVERY.test(deliveryId || '')) {
     return { ok: false, reason: 'WEBHOOK_EVENT_OR_DELIVERY_NOT_SUPPORTED' };
   }
   let payload;
   try { payload = parseUniqueKeySourceLock(rawBody); } catch (_) {
     return { ok: false, reason: 'WEBHOOK_JSON_INVALID' };
   }
-  if (!record(payload) || !ALLOWED_ACTIONS.has(payload.action) ||
+  if (!record(payload) ||
+      !(event === 'pull_request' ? ALLOWED_ACTIONS.has(payload.action) :
+        event === 'pull_request_review' ? REVIEW_ACTIONS.has(payload.action) :
+          payload.action === 'completed') ||
       !record(payload.repository) || payload.repository.full_name !== REPO ||
       !record(payload.installation) ||
-      payload.installation.id !== trustedInstallationId ||
-      !record(payload.pull_request) ||
-      payload.number !== payload.pull_request.number ||
-      !Number.isSafeInteger(payload.number) || payload.number <= 0 ||
-      !record(payload.pull_request.base) ||
-      payload.pull_request.base.ref !== 'main' ||
-      payload.pull_request.base.repo?.full_name !== REPO ||
-      !record(payload.pull_request.head) ||
-      payload.pull_request.head.repo?.full_name !== REPO ||
-      typeof payload.pull_request.head.sha !== 'string' ||
-      !SHA.test(payload.pull_request.head.sha)) {
+      payload.installation.id !== trustedInstallationId) {
+    return { ok: false, reason: 'WEBHOOK_TARGET_OUT_OF_SCOPE' };
+  }
+  // A workflow_run webhook has a different GitHub payload shape. GitHub
+  // Actions push runs may have no linked PR; those cannot be guessed.
+  if (event === 'workflow_run') {
+    const run = payload.workflow_run;
+    const pulls = run?.pull_requests;
+    if (!record(run) || !SHA.test(run.head_sha || '') ||
+        !Array.isArray(pulls) || pulls.length !== 1 ||
+        !Number.isSafeInteger(pulls[0]?.number) || pulls[0].number <= 0 ||
+        (run.conclusion !== 'success' && run.conclusion !== 'failure')) {
+      return { ok: false, reason: 'WEBHOOK_WORKFLOW_PR_UNBOUND' };
+    }
+    return { ok: true, deliveryId, installationId: trustedInstallationId,
+      pullNumber: pulls[0].number, headSha: run.head_sha };
+  }
+  const pr = payload.pull_request;
+  if (!record(pr) || (event === 'pull_request' && payload.number !== pr.number) ||
+      !Number.isSafeInteger(pr.number) || pr.number <= 0 ||
+      !record(pr.base) || pr.base.ref !== 'main' ||
+      pr.base.repo?.full_name !== REPO || !record(pr.head) ||
+      pr.head.repo?.full_name !== REPO ||
+      typeof pr.head.sha !== 'string' || !SHA.test(pr.head.sha)) {
     return { ok: false, reason: 'WEBHOOK_TARGET_OUT_OF_SCOPE' };
   }
   return { ok: true, deliveryId, installationId: trustedInstallationId,
-    pullNumber: payload.number, headSha: payload.pull_request.head.sha };
+    pullNumber: pr.number, headSha: pr.head.sha };
 }
 
 /**
@@ -99,8 +121,55 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
     webhookSecret: host.webhookSecret,
     trustedInstallationId: host.trustedInstallationId });
   if (!parsed.ok) return hold(parsed.reason);
-  if (host.enableFailureCheckWrites !== true ||
-      host.founderAuthorizedFailureOnly !== 'EXPLICIT_FAILURE_ONLY') {
+  return processVerifiedGuardianTarget(parsed, host);
+}
+
+/**
+ * For a trusted owner scheduler when push-based workflow_run events contain no
+ * linked PR. The caller MUST be an independently authenticated owner runtime;
+ * this method has no HTTP route and defaults OFF. PR number/SHA are still
+ * checked against the signed remote policy and fresh GitHub REST evidence.
+ */
+async function processGuardianReconciliation({ pullNumber, headSha, host,
+  operatorSession }) {
+  if (!record(host) || host.enableOwnerReconciliation !== true ||
+      host.ownerReconciliationGrant !== 'EXPLICIT_OWNER_RECONCILIATION' ||
+      typeof host.authorizeReconciliation !== 'function' ||
+      !host.reconciliationRateLimiter ||
+      typeof host.reconciliationRateLimiter.allow !== 'function' ||
+      !Number.isSafeInteger(pullNumber) || pullNumber <= 0 ||
+      !SHA.test(headSha || '') ||
+      !Number.isSafeInteger(host.trustedInstallationId) ||
+      host.trustedInstallationId <= 0) {
+    return hold('OWNER_RECONCILIATION_OFF_OR_INVALID');
+  }
+  try {
+    if (await host.authorizeReconciliation({ operatorSession, pullNumber,
+      headSha }) !== true ||
+        await host.reconciliationRateLimiter.allow({ pullNumber, headSha }) !== true) {
+      return hold('OWNER_RECONCILIATION_NOT_AUTHORIZED');
+    }
+  } catch (_) { return hold('OWNER_RECONCILIATION_AUTHORITY_UNVERIFIED'); }
+  return processVerifiedGuardianTarget({
+    deliveryId: crypto.randomUUID(),
+    installationId: host.trustedInstallationId, pullNumber, headSha,
+  }, host);
+}
+
+async function processVerifiedGuardianTarget(parsed, host) {
+  // Reject conflicting raw switches even if only one authorization grant is
+  // present. Authorization must not silently resolve a mixed host setting.
+  if (host.enableFullCheckWrites === true &&
+      host.enableFailureCheckWrites === true) {
+    return hold('FEATURE_OFF', { deliveryId: parsed.deliveryId });
+  }
+  const fullMode = host.enableFullCheckWrites === true &&
+    host.founderAuthorizedFullMode === 'EXPLICIT_FULL_CHECK_WRITES';
+  const failureOnlyMode = host.enableFailureCheckWrites === true &&
+    host.founderAuthorizedFailureOnly === 'EXPLICIT_FAILURE_ONLY';
+  // Mixed modes or partial configuration never silently select a mode.
+  if ((fullMode && failureOnlyMode) ||
+      (!fullMode && !failureOnlyMode)) {
     return hold('FEATURE_OFF', { deliveryId: parsed.deliveryId });
   }
   if (!host.deliveryStore || typeof host.deliveryStore.reserveOnce !== 'function' ||
@@ -112,7 +181,9 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
       host.expectedOwnerAccountId <= 0 ||
       !Number.isSafeInteger(host.expectedRepositoryId) ||
       host.expectedRepositoryId <= 0 ||
-      typeof host.githubAppPrivateKeyPem !== 'string') {
+      typeof host.githubAppPrivateKeyPem !== 'string' ||
+      (fullMode && (!host.conclusionStore ||
+        typeof host.conclusionStore.reserveOnce !== 'function'))) {
     return hold('HOST_TRUST_OR_DURABLE_REPLAY_STORE_MISSING');
   }
 
@@ -158,6 +229,7 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
       installationId: parsed.installationId,
       privateKeyPem: host.githubAppPrivateKeyPem,
       expectedRepositoryId: host.expectedRepositoryId,
+      requireActionsRead: fullMode,
     });
   } catch (_) { return hold('GITHUB_APP_INSTALLATION_TOKEN_UNAVAILABLE'); }
 
@@ -169,13 +241,88 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
         signedPolicyEnvelope: policy.envelope,
         trustedPolicyPublicKeyPem: policy.publicKeyPem,
         githubAppInstallationToken: installationToken.token,
+        requireConclusiveEvidence: fullMode,
+        expectedGuardianAppId: host.guardianAppId,
       });
     } catch (_) { evidence = hold('GUARDIAN_EVIDENCE_READ_FAILED'); }
   }
-  // This code must never silently grow a success path. The only check-run
-  // endpoint invocation is hardwired to conclusion=failure.
+  // A signed v1/v2 policy, missing review approval, unverified workflow
+  // association, unbound branch rule or stale exact head can NEVER PASS.
   const reason = typeof evidence.reason === 'string' &&
     /^[A-Z0-9_]+$/.test(evidence.reason) ? evidence.reason : 'GUARDIAN_HOLD';
+  const terminalFailure = fullMode &&
+    reason === 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE';
+  // Ordinary pre-review / pre-CI evidence is not a terminal failure. Keep the
+  // required context missing (GitHub blocks merge) until an eligible later
+  // event completes the same immutable head. No permanent conclusion row yet.
+  if (fullMode && evidence.eligibleForSuccess !== true && !terminalFailure) {
+    return hold('AWAITING_CONCLUSIVE_EXACT_HEAD_EVIDENCE', {
+      evaluatedReason: reason, deliveryId: parsed.deliveryId,
+    });
+  }
+  // G9: re-read App and repository installation authority after evaluating
+  // evidence and immediately before the only supported Check Run write.
+  // A stale persisted binding is never enough, and uncertainty is HOLD.
+  try {
+    await revalidateCurrentInstallationScope({
+      appId: host.guardianAppId, installationId: parsed.installationId,
+      privateKeyPem: host.githubAppPrivateKeyPem,
+      installationToken: installationToken.token,
+      expectedOwnerAccountId: host.expectedOwnerAccountId,
+      expectedRepositoryId: host.expectedRepositoryId,
+      requireActionsRead: fullMode,
+    });
+  } catch (_) {
+    return hold('FRESH_INSTALLATION_SCOPE_UNVERIFIED', {
+      deliveryId: parsed.deliveryId, evaluatedReason: reason,
+    });
+  }
+  if (fullMode && evidence.eligibleForSuccess === true && policy) {
+    const freshSignature = verifySignedPolicy(policy.envelope,
+      policy.publicKeyPem, { requirePullBinding: true,
+        expectedPullNumber: parsed.pullNumber });
+    if (!freshSignature.signatureChecked ||
+        freshSignature.headSha !== parsed.headSha ||
+        !freshSignature.releasePolicy ||
+        freshSignature.releasePolicy.guardianAppId !== host.guardianAppId ||
+        freshSignature.payloadSha256 !== evidence.signedPolicySha256) {
+      return hold('SIGNED_SUCCESS_AUTHORITY_STALE');
+    }
+    // Atomic once-per-head gate is deliberately placed *after* the positive
+    // read: an early incomplete review does not permanently burn the head.
+    try {
+      if (await host.conclusionStore.reserveOnce({
+        repositoryId: host.expectedRepositoryId,
+        pullNumber: parsed.pullNumber, headSha: parsed.headSha,
+        deliveryId: parsed.deliveryId,
+      }) !== true) return hold('CONCLUSION_ALREADY_RESERVED_OR_UNRECONCILED');
+    } catch (_) { return hold('CONCLUSION_RESERVATION_UNVERIFIED'); }
+    try {
+      const receipt = await postConclusiveSuccessCheck({
+        token: installationToken.token, headSha: parsed.headSha,
+        appId: host.guardianAppId,
+        explicitFullModeGrant: 'GUARDIAN_HOST_EXPLICIT_FULL_MODE',
+        summary: 'Independent signed policy, exact-head approval, GitHub Actions ' +
+          'workflow job associations, required-check App bindings, and explicitly ' +
+          'empty active ruleset bypass-actor lists verified at read time.',
+      });
+      return hold('SUCCESS_CHECK_RECORDED_RELEASE_HOLD', {
+        deliveryId: parsed.deliveryId, checkRunId: receipt.checkRunId,
+        conclusion: 'success', authoritativeRequiredCheck: 'ISSUED',
+      });
+    } catch (_) {
+      return hold('SUCCESS_CHECK_NOT_CONFIRMED', { deliveryId: parsed.deliveryId });
+    }
+  }
+  if (terminalFailure) {
+    try {
+      if (await host.conclusionStore.reserveOnce({
+        repositoryId: host.expectedRepositoryId,
+        pullNumber: parsed.pullNumber, headSha: parsed.headSha,
+        deliveryId: parsed.deliveryId,
+      }) !== true) return hold('CONCLUSION_ALREADY_RESERVED_OR_UNRECONCILED');
+    } catch (_) { return hold('CONCLUSION_RESERVATION_UNVERIFIED'); }
+  }
   try {
     const receipt = await postFailureOnlyCheck({ token: installationToken.token,
       headSha: parsed.headSha,
@@ -193,4 +340,5 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
   }
 }
 
-module.exports = { verifyWebhook, processGuardianDelivery };
+module.exports = { verifyWebhook, processGuardianDelivery,
+  processGuardianReconciliation };

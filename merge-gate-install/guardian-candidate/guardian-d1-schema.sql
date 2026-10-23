@@ -43,3 +43,15 @@ CREATE TABLE IF NOT EXISTS guardian_delivery_receipts (
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   )
 ) STRICT;
+
+-- Optional full-mode gate: exactly one authoritative conclusion attempt per
+-- repository/PR/head. A failed or uncertain POST leaves a permanent tombstone
+-- for operator reconciliation; never silently retry with a conflicting check.
+CREATE TABLE IF NOT EXISTS guardian_conclusion_reservations (
+  repository_id INTEGER NOT NULL CHECK (repository_id > 0),
+  pull_number INTEGER NOT NULL CHECK (pull_number > 0),
+  head_sha TEXT NOT NULL CHECK (length(head_sha) = 40),
+  delivery_hash TEXT NOT NULL UNIQUE CHECK (length(delivery_hash) = 64),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (repository_id, pull_number, head_sha)
+) STRICT;

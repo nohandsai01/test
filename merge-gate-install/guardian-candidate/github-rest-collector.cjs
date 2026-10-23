@@ -91,20 +91,27 @@ function getJson(path, installationToken) {
 function normalizedPr(raw) {
   guard(object(raw) && Number.isSafeInteger(raw.number) && raw.number > 0 &&
     (raw.state === 'open' || raw.state === 'closed') && object(raw.base) &&
-    object(raw.head) && object(raw.base.repo) && object(raw.head.repo),
+    object(raw.head) && object(raw.base.repo) && object(raw.head.repo) &&
+    object(raw.user) && Number.isSafeInteger(raw.user.id) && raw.user.id > 0 &&
+    typeof raw.draft === 'boolean',
   'GITHUB_PR_RESPONSE_INVALID');
   return {
     number: raw.number,
     state: raw.state,
+    draft: raw.draft,
+    author: { id: raw.user.id, login: raw.user.login, type: raw.user.type },
     base: { ref: raw.base.ref, repo: { full_name: raw.base.repo.full_name } },
     head: { sha: raw.head.sha, repo: { full_name: raw.head.repo.full_name } },
   };
 }
 function normalizedCheck(raw) {
-  guard(object(raw) && object(raw.app), 'GITHUB_CHECK_RESPONSE_INVALID');
+  guard(object(raw) && object(raw.app) && object(raw.check_suite) &&
+    Number.isSafeInteger(raw.check_suite.id) && raw.check_suite.id > 0,
+  'GITHUB_CHECK_RESPONSE_INVALID');
   return {
     id: raw.id, name: raw.name, head_sha: raw.head_sha,
     app: { id: raw.app.id }, status: raw.status,
+    check_suite: { id: raw.check_suite.id },
     conclusion: raw.conclusion, completed_at: raw.completed_at,
   };
 }
@@ -208,4 +215,7 @@ async function collectAuthenticatedGithubSnapshot({ pullNumber, expectedHeadSha,
   };
 }
 
-module.exports = { collectAuthenticatedGithubSnapshot, CollectorError };
+// This bounded reader is internal infrastructure for the independently
+// authenticated provenance collector; it never sends arbitrary HTTP origins.
+module.exports = { collectAuthenticatedGithubSnapshot, CollectorError,
+  readGuardianGithubJson: getJson };

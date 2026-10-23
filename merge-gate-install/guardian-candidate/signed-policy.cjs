@@ -69,11 +69,14 @@ function verifySignedPolicy(rawEnvelope, trustedPublicKeyPem, scope = {}) {
     const scopedV2 = fields(signed, ['schemaVersion', 'issuedAt', 'expiresAt',
       'pullNumber', 'evidencePolicy']) && signed.schemaVersion === 2 &&
       Number.isSafeInteger(signed.pullNumber) && signed.pullNumber > 0;
+    const scopedV3 = fields(signed, ['schemaVersion', 'issuedAt', 'expiresAt',
+      'pullNumber', 'evidencePolicy', 'releasePolicy']) && signed.schemaVersion === 3 &&
+      Number.isSafeInteger(signed.pullNumber) && signed.pullNumber > 0;
     const legacyV1 = fields(signed,
       ['schemaVersion', 'issuedAt', 'expiresAt', 'evidencePolicy']) &&
       signed.schemaVersion === 1;
-    if ((!scopedV2 && !legacyV1) ||
-        (requirePullBinding && (!scopedV2 ||
+    if ((!scopedV2 && !scopedV3 && !legacyV1) ||
+        (requirePullBinding && (!(scopedV2 || scopedV3) ||
           signed.pullNumber !== scope.expectedPullNumber)) ||
         !fields(signed.evidencePolicy,
           ['schemaVersion', 'repository', 'targetBranch', 'headSha', 'evidence'])) {
@@ -102,6 +105,36 @@ function verifySignedPolicy(rawEnvelope, trustedPublicKeyPem, scope = {}) {
       types.add(item.type);
       names.add(item.checkName);
     }
+    // Only the new signed v3 contract can authorize a *candidate* for a
+    // positive Check Run. A legacy v1/v2 signature never upgrades silently.
+    if (scopedV3) {
+      const release = signed.releasePolicy;
+      if (!fields(release, ['schemaVersion', 'guardianAppId', 'reviewerIds',
+        'minApprovals', 'workflows']) || release.schemaVersion !== 1 ||
+        !Number.isSafeInteger(release.guardianAppId) || release.guardianAppId <= 0 ||
+        !Array.isArray(release.reviewerIds) || release.reviewerIds.length < 1 ||
+        release.reviewerIds.length > 8 ||
+        new Set(release.reviewerIds).size !== release.reviewerIds.length ||
+        release.reviewerIds.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
+        !Number.isSafeInteger(release.minApprovals) || release.minApprovals < 1 ||
+        release.minApprovals > release.reviewerIds.length ||
+        !Array.isArray(release.workflows) || release.workflows.length !== 2) {
+        return rejected('SIGNED_RELEASE_POLICY_INVALID');
+      }
+      const boundTypes = new Set();
+      if (policy.evidence.some((item) => item.issuerAppId === release.guardianAppId)) {
+        return rejected('SIGNED_RELEASE_GUARDIAN_SELF_EVIDENCE');
+      }
+      for (const binding of release.workflows) {
+        if (!fields(binding, ['type', 'workflowId', 'event']) ||
+            !types.has(binding.type) || boundTypes.has(binding.type) ||
+            !Number.isSafeInteger(binding.workflowId) || binding.workflowId <= 0 ||
+            !['pull_request', 'push'].includes(binding.event)) {
+          return rejected('SIGNED_RELEASE_WORKFLOW_INVALID');
+        }
+        boundTypes.add(binding.type);
+      }
+    }
     const issued = Date.parse(signed.issuedAt);
     const expires = Date.parse(signed.expiresAt);
     const now = Date.now();
@@ -118,7 +151,8 @@ function verifySignedPolicy(rawEnvelope, trustedPublicKeyPem, scope = {}) {
       payloadSha256: crypto.createHash('sha256').update(payloadBytes).digest('hex'),
       rawPolicy: Buffer.from(JSON.stringify(policy), 'utf8'),
       headSha: policy.headSha,
-      pullNumber: scopedV2 ? signed.pullNumber : null,
+      pullNumber: scopedV2 || scopedV3 ? signed.pullNumber : null,
+      releasePolicy: scopedV3 ? JSON.parse(JSON.stringify(signed.releasePolicy)) : null,
       trusted: false, activationAllowed: false,
     };
   } catch (_) {

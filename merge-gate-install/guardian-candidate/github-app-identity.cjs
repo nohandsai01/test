@@ -163,7 +163,7 @@ function createAppJwt({ appId, privateKeyPem, now = Date.now() }) {
 
 /** Token never leaves the trusted host except as an Authorization header. */
 async function mintScopedInstallationToken({ appId, installationId, privateKeyPem,
-  expectedRepositoryId }) {
+  expectedRepositoryId, requireActionsRead = false }) {
   assert(Number.isSafeInteger(installationId) && installationId > 0,
     'GUARDIAN_INSTALLATION_ID_INVALID');
   assert(Number.isSafeInteger(expectedRepositoryId) && expectedRepositoryId > 0,
@@ -173,13 +173,15 @@ async function mintScopedInstallationToken({ appId, installationId, privateKeyPe
   const response = await githubJson('POST', '/app/installations/' + installationId +
     '/access_tokens', jwt, {
     repositories: ['test'],
-    permissions: { checks: 'write', pull_requests: 'read' },
+    permissions: { checks: 'write', pull_requests: 'read',
+      ...(requireActionsRead === true ? { actions: 'read' } : {}) },
   });
   assert(typeof response.token === 'string' && response.token.length >= 16 &&
     typeof response.expires_at === 'string' &&
     Date.parse(response.expires_at) > Date.now() + 60_000 &&
     isRecord(response.permissions) && response.permissions.checks === 'write' &&
     response.permissions.pull_requests === 'read' &&
+    (requireActionsRead !== true || response.permissions.actions === 'read') &&
     Array.isArray(response.repositories) && response.repositories.length === 1 &&
     isRecord(response.repositories[0]) &&
     response.repositories[0].full_name === 'nohandsai01/test' &&
@@ -188,6 +190,58 @@ async function mintScopedInstallationToken({ appId, installationId, privateKeyPe
   'GUARDIAN_SCOPED_TOKEN_UNVERIFIED');
   return { token: response.token, expiresAt: response.expires_at,
     installationId, appId };
+}
+
+/**
+ * G9: fresh GitHub App/installation/repository identity immediately before
+ * any future FAILURE-only Check Run write. Old D1 bindings alone are not
+ * current authorization. All calls use fixed GitHub HTTPS paths, not PR input.
+ * A successful read is a point-in-time observation, not an atomic lease.
+ */
+async function revalidateCurrentInstallationScope({ appId, installationId,
+  privateKeyPem, installationToken, expectedOwnerAccountId,
+  expectedRepositoryId, requireActionsRead = false }) {
+  assert(Number.isSafeInteger(installationId) && installationId > 0 &&
+    Number.isSafeInteger(expectedOwnerAccountId) && expectedOwnerAccountId > 0 &&
+    Number.isSafeInteger(expectedRepositoryId) && expectedRepositoryId > 0,
+  'GUARDIAN_FRESH_SCOPE_INPUT_INVALID');
+  const jwt = createAppJwt({ appId, privateKeyPem });
+  // A 404, suspension, changed owner, removed repository, reduced
+  // permission, unexpected installation or transport uncertainty HOLDS.
+  const [installation, repositoryInstallation, repository] = await Promise.all([
+    githubJson('GET', '/app/installations/' + installationId, jwt),
+    githubJson('GET', '/repos/nohandsai01/test/installation', jwt),
+    githubJson('GET', '/repos/nohandsai01/test', installationToken),
+  ]);
+  const matchingInstallation = (entry) =>
+    isRecord(entry) && entry.id === installationId && entry.app_id === appId &&
+    isRecord(entry.account) &&
+    entry.account.id === expectedOwnerAccountId &&
+    entry.account.login === 'nohandsai01' &&
+    entry.account.type === 'User' &&
+    entry.target_id === expectedOwnerAccountId &&
+    entry.target_type === 'User' &&
+    entry.repository_selection === 'selected' &&
+    entry.suspended_at === null &&
+    isRecord(entry.permissions) &&
+    entry.permissions.checks === 'write' &&
+    entry.permissions.pull_requests === 'read' &&
+    (requireActionsRead !== true || entry.permissions.actions === 'read') &&
+    Array.isArray(entry.events) && entry.events.includes('pull_request') &&
+    (requireActionsRead !== true || entry.events.includes('pull_request_review'));
+  assert(matchingInstallation(installation) &&
+    matchingInstallation(repositoryInstallation) &&
+    isRecord(repository.owner) &&
+    repository.id === expectedRepositoryId &&
+    repository.full_name === 'nohandsai01/test' &&
+    repository.owner.id === expectedOwnerAccountId &&
+    repository.owner.login === 'nohandsai01',
+  'GUARDIAN_FRESH_INSTALLATION_SCOPE_UNVERIFIED');
+  return Object.freeze({
+    current: true, installationId, appId,
+    ownerAccountId: expectedOwnerAccountId,
+    repositoryId: expectedRepositoryId,
+  });
 }
 
 /** Deliberately no generic check writer or success conclusion is exposed. */
@@ -208,5 +262,34 @@ async function postFailureOnlyCheck({ token, headSha, summary }) {
   return { checkRunId: result.id, headSha, conclusion: 'failure' };
 }
 
+/**
+ * Intentionally separate from the original failure-only function. A positive
+ * Check Run is only usable when the independent host supplies a protected
+ * full-mode grant AND its evaluator has collected the signed v3 provenance.
+ * No default caller reaches this function and importing it writes nothing.
+ */
+async function postConclusiveSuccessCheck({ token, headSha, summary, appId,
+  explicitFullModeGrant }) {
+  assert(explicitFullModeGrant === 'GUARDIAN_HOST_EXPLICIT_FULL_MODE' &&
+    Number.isSafeInteger(appId) && appId > 0 &&
+    typeof headSha === 'string' && SHA.test(headSha) &&
+    typeof summary === 'string' && summary.length > 0 &&
+    summary.length <= 3000 && /^[\x20-\x7e\n]+$/.test(summary),
+  'GUARDIAN_SUCCESS_CHECK_NOT_AUTHORIZED');
+  const result = await githubJson('POST', '/repos/nohandsai01/test/check-runs', token, {
+    name: 'NO HANDS Merge Gate Required Check', head_sha: headSha,
+    status: 'completed', conclusion: 'success',
+    output: { title: 'Guardian exact-head requirements satisfied', summary },
+  });
+  assert(Number.isSafeInteger(result.id) && result.id > 0 &&
+    result.name === 'NO HANDS Merge Gate Required Check' &&
+    result.head_sha === headSha && result.conclusion === 'success' &&
+    isRecord(result.app) && result.app.id === appId,
+  'GUARDIAN_SUCCESS_CHECK_RECEIPT_INVALID');
+  return { checkRunId: result.id, headSha, conclusion: 'success' };
+}
+
 module.exports = { createAppJwt, mintScopedInstallationToken,
-  postFailureOnlyCheck, verifyOwnerInstallationBinding, GuardianApiError };
+  postFailureOnlyCheck, verifyOwnerInstallationBinding,
+  postConclusiveSuccessCheck, revalidateCurrentInstallationScope,
+  GuardianApiError };
