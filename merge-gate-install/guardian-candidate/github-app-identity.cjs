@@ -190,6 +190,56 @@ async function mintScopedInstallationToken({ appId, installationId, privateKeyPe
     installationId, appId };
 }
 
+/**
+ * G9: fresh GitHub App/installation/repository identity immediately before
+ * any future FAILURE-only Check Run write. Old D1 bindings alone are not
+ * current authorization. All calls use fixed GitHub HTTPS paths, not PR input.
+ * A successful read is a point-in-time observation, not an atomic lease.
+ */
+async function revalidateCurrentInstallationScope({ appId, installationId,
+  privateKeyPem, installationToken, expectedOwnerAccountId,
+  expectedRepositoryId }) {
+  assert(Number.isSafeInteger(installationId) && installationId > 0 &&
+    Number.isSafeInteger(expectedOwnerAccountId) && expectedOwnerAccountId > 0 &&
+    Number.isSafeInteger(expectedRepositoryId) && expectedRepositoryId > 0,
+  'GUARDIAN_FRESH_SCOPE_INPUT_INVALID');
+  const jwt = createAppJwt({ appId, privateKeyPem });
+  // A 404, suspension, changed owner, removed repository, reduced
+  // permission, unexpected installation or transport uncertainty HOLDS.
+  const [installation, repositoryInstallation, repository] = await Promise.all([
+    githubJson('GET', '/app/installations/' + installationId, jwt),
+    githubJson('GET', '/repos/nohandsai01/test/installation', jwt),
+    githubJson('GET', '/repos/nohandsai01/test', installationToken),
+  ]);
+  const matchingInstallation = (entry) =>
+    isRecord(entry) && entry.id === installationId && entry.app_id === appId &&
+    isRecord(entry.account) &&
+    entry.account.id === expectedOwnerAccountId &&
+    entry.account.login === 'nohandsai01' &&
+    entry.account.type === 'User' &&
+    entry.target_id === expectedOwnerAccountId &&
+    entry.target_type === 'User' &&
+    entry.repository_selection === 'selected' &&
+    entry.suspended_at === null &&
+    isRecord(entry.permissions) &&
+    entry.permissions.checks === 'write' &&
+    entry.permissions.pull_requests === 'read' &&
+    Array.isArray(entry.events) && entry.events.includes('pull_request');
+  assert(matchingInstallation(installation) &&
+    matchingInstallation(repositoryInstallation) &&
+    isRecord(repository.owner) &&
+    repository.id === expectedRepositoryId &&
+    repository.full_name === 'nohandsai01/test' &&
+    repository.owner.id === expectedOwnerAccountId &&
+    repository.owner.login === 'nohandsai01',
+  'GUARDIAN_FRESH_INSTALLATION_SCOPE_UNVERIFIED');
+  return Object.freeze({
+    current: true, installationId, appId,
+    ownerAccountId: expectedOwnerAccountId,
+    repositoryId: expectedRepositoryId,
+  });
+}
+
 /** Deliberately no generic check writer or success conclusion is exposed. */
 async function postFailureOnlyCheck({ token, headSha, summary }) {
   assert(typeof headSha === 'string' && SHA.test(headSha) &&
@@ -209,4 +259,5 @@ async function postFailureOnlyCheck({ token, headSha, summary }) {
 }
 
 module.exports = { createAppJwt, mintScopedInstallationToken,
-  postFailureOnlyCheck, verifyOwnerInstallationBinding, GuardianApiError };
+  postFailureOnlyCheck, verifyOwnerInstallationBinding,
+  revalidateCurrentInstallationScope, GuardianApiError };

@@ -8,7 +8,8 @@
 const crypto = require('node:crypto');
 const { parseUniqueKeySourceLock } = require('../candidate/verify-source-lock.cjs');
 const { readAndEvaluateGuardianCandidate } = require('./read-and-evaluate.cjs');
-const { mintScopedInstallationToken, postFailureOnlyCheck } =
+const { mintScopedInstallationToken, postFailureOnlyCheck,
+  revalidateCurrentInstallationScope } =
   require('./github-app-identity.cjs');
 const { fetchIndependentlySignedPolicy, GuardianPolicySourceError } =
   require('./independent-policy-source.cjs');
@@ -176,6 +177,22 @@ async function processGuardianDelivery({ rawBody, headers, host }) {
   // endpoint invocation is hardwired to conclusion=failure.
   const reason = typeof evidence.reason === 'string' &&
     /^[A-Z0-9_]+$/.test(evidence.reason) ? evidence.reason : 'GUARDIAN_HOLD';
+  // G9: re-read App and repository installation authority after evaluating
+  // evidence and immediately before the only supported Check Run write.
+  // A stale persisted binding is never enough, and uncertainty is HOLD.
+  try {
+    await revalidateCurrentInstallationScope({
+      appId: host.guardianAppId, installationId: parsed.installationId,
+      privateKeyPem: host.githubAppPrivateKeyPem,
+      installationToken: installationToken.token,
+      expectedOwnerAccountId: host.expectedOwnerAccountId,
+      expectedRepositoryId: host.expectedRepositoryId,
+    });
+  } catch (_) {
+    return hold('FRESH_INSTALLATION_SCOPE_UNVERIFIED', {
+      deliveryId: parsed.deliveryId, evaluatedReason: reason,
+    });
+  }
   try {
     const receipt = await postFailureOnlyCheck({ token: installationToken.token,
       headSha: parsed.headSha,

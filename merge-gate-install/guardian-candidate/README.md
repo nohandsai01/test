@@ -333,6 +333,36 @@ Additional official references:
 - https://docs.github.com/en/apps/sharing-github-apps/sharing-your-github-app
 - https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url
 
+### G9 — fresh installation-scope gate before Check Run egress (source-only)
+
+A durable installation binding is historical evidence; it is **not** proof
+that a GitHub App remains installed, unsuspended, or authorized for this
+repository today. G9 introduces `revalidateCurrentInstallationScope(...)`
+in `github-app-identity.cjs` and places it immediately before the existing
+**FAILURE-only** `POST /check-runs` call in `guardian-webhook-runtime.cjs`.
+
+- The host-authenticated App JWT re-reads the exact installation and the
+  exact `nohandsai01/test` repository installation from fixed HTTPS GitHub
+  REST endpoints; the short-lived scoped installation token independently
+  re-reads numeric repository identity.
+- Both installation records must match the pinned App ID, installation ID,
+  numeric owner ID, owner login/type, selected repository scope, unsuspended
+  state, required `checks:write` and `pull_requests:read` permissions, and
+  `pull_request` subscription. The repository must match the pinned numeric
+  repository ID and owner.
+- Any GitHub 404/401, permission drift, API timeout, malformed response or
+  mismatch returns `FRESH_INSTALLATION_SCOPE_UNVERIFIED` under HOLD **before**
+  any Check Run write. The permanent webhook-delivery replay reservation has
+  already occurred, so uncertain attempts require owner reconciliation.
+- Revalidation is a point-in-time check, **not** an atomic GitHub authorization
+  lease. Uninstall/revocation can race between the last GET and POST. The
+  GitHub API remains the final enforcer; a separate revocation-event and
+  owner-controlled rebinding workflow is still required before activation.
+
+G9 does **not** add a success writer, change an environment flag, start a
+listener, deploy, migrate D1, install an App, merge or execute any tests.
+Feature OFF / Launch HOLD remain binding.
+
 ## Non-negotiable missing authority
 
 Even when every field matches, output remains `trusted=false`,
