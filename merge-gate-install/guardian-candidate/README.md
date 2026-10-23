@@ -281,6 +281,50 @@ data store, rate limits, observability, approved keys, active branch ruleset,
 and a separate final acceptance gate. There is no attempt to provision any of
 those resources in this batch.
 
+### G8 — protected owner HTTP onboarding adapter (still inert)
+
+`guardian-owner-http.cjs` supplies the missing HTTP boundary between the G7
+OAuth/PKCE bridge and an independently authenticated owner host. The existing
+`createGuardianHttpServer` attaches it **only** when
+`host.enableOwnerOnboardingRoutes === true` and a complete
+`host.ownerOnboarding` configuration is injected. Merely importing modules or
+creating the HTTP server **never calls `.listen()`**, registers an App, or
+enables FAILURE checks. This source does not create an owner login system.
+
+| Route | Request | Host protections and result |
+| --- | --- | --- |
+| `/guardian/install/start` | `POST`, zero-length body | Authenticated and pinned numeric owner identity, `Origin`, protected host CSRF validator and rate limiter; stores an install intent, then sets the `__Host-guardian_install_state` first-party cookie and issues a 303 redirect to the fixed GitHub installation URL |
+| `/guardian/install/setup` | `GET` with GitHub `installation_id`; optional `setup_action` | Same verified host session and protected cookie, strict single-value query parsing and rate limit; reserves durable OAuth state/PKCE, then issues a 302 redirect to GitHub OAuth; the claimed installation ID is **not trusted** |
+| `/guardian/install/oauth/callback` | `GET` with OAuth `code` and `state` | Same session/cookie and rate limit, consumes state once before GitHub token exchange, verifies account/installation/repository through GitHub REST, clears the temporary cookie and reports only `INSTALLATION_VERIFIED_NOT_ACTIVATED` or HOLD |
+
+The owner host must supply `authenticateOwnerRequest(req)` returning a
+**server-verified** `{sessionId, ownerAccountId}`, `verifyCsrf(...)`, and a
+**durable** `rateLimiter.allow(...)`, together with exact pinned origin,
+callback, App identity, keys and the three previously defined D1 stores. It
+must not treat a cookie or inbound query alone as a login. If any dependency
+is missing, setup routing fails closed; no in-memory fallback exists. The
+public origin must be HTTPS with no arbitrary path, the callback URI must be
+that origin plus `/guardian/install/oauth/callback`, and a trusted external
+TLS terminator must constrain Host headers. `X-Forwarded-*` does not create
+trust by itself. The state cookie is `Secure; HttpOnly; SameSite=Lax; Path=/`,
+with a ten-minute maximum age and no `Domain` attribute.
+
+When registering the GitHub App separately, the proposed Setup URL is the
+exact owner HTTPS origin plus `/guardian/install/setup`, while the OAuth
+authorization callback is `/guardian/install/oauth/callback`. GitHub's
+Setup URL documentation only guarantees `installation_id`; if
+`setup_action` is missing, this router labels the intent `install` solely
+for local correlation, **not** authorization. GitHub REST cross-checking
+remains mandatory. A hostile duplicate, unexpected query, cross-origin
+start, stale state, failed CSRF/rate limit, unexpected redirect target, or
+ambiguous cookie results in HOLD.
+
+This delivery provides **source code**, not a live host. The HTTP adapter
+cannot attest that the host's owner authentication, TLS, CSRF token custody,
+rate limiting or D1 migration actually exists. It has no success check writer
+and cannot lift Feature OFF / Launch HOLD. No tests, QA, CI, App installation,
+schema migration, deployment or activation are performed as part of G8.
+
 Additional official references:
 
 - https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
