@@ -421,7 +421,18 @@ check-run pagination:
    require at least the signed minimum approvals, dismiss stale approvals on
    new pushes, and require approval by someone other than the last pusher.
    Missing rules, unpinned check names and malformed responses HOLD. The PR
-   and Check Runs are re-read after provenance checks.
+   and Check Runs are re-read after provenance checks. **P2-01 bypass guard:**
+   every active rule returned for `main` must identify its repository ruleset;
+   the Guardian then reads each distinct `/rulesets/{id}` and requires an
+   explicitly returned, empty `bypass_actors` array. Any configured bypass
+   actor (including PR-only bypass), omitted/hidden array, ambiguous source,
+   inaccessible ruleset or transport error HOLDS. The success summary refers
+   only to this verified point-in-time state, not permanent non-bypassability.
+   GitHub intentionally omits `bypass_actors` without ruleset **write** access:
+   the currently scoped low-privilege App is therefore expected to HOLD even
+   for an actually empty list. Do **not** silently grant Guardian repository
+   administration/write access just to make it PASS; a separately reviewed
+   least-privilege owner attestation design is an unresolved activation gate.
 5. Immediately before egress, the host revalidates the installed, selected,
    unsuspended App/repository scope, now also with `actions:read` permission,
    and rechecks policy signature/expiry. A durable D1 reservation keyed by
@@ -470,7 +481,8 @@ schedule background polling, or create operator authentication.
 
 Relevant GitHub endpoints: `/pulls/{n}/commits`, `/pulls/{n}/reviews`,
 `/pulls/{n}/files`, `/actions/workflows/{id}/runs`,
-`/actions/runs/{id}/jobs`, `/rules/branches/main`, and `/check-runs`.
+`/actions/runs/{id}/jobs`, `/rules/branches/main`, `/rulesets/{id}`,
+and `/check-runs`.
 
 ## Non-negotiable missing authority
 

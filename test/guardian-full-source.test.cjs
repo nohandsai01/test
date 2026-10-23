@@ -134,6 +134,10 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
   const prior = collector.readGuardianGithubJson;
   let files = [{ filename: 'src/a.cjs', status: 'modified' }];
   let rulesAppId = 999;
+  let rulesetBypassActors = [];
+  let rulesetIdentity = 'valid';
+  let extraRuleset = false;
+  let extraRulesetBypassActors = [];
   let ruleChecks = [
     { context: CHECK, integration_id: 999 },
     { context: 'tests-run', integration_id: 777 },
@@ -150,16 +154,31 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     if (path.includes('/pulls/12/files')) return { body: files, link: '' };
     if (path.includes('/rules/branches/main')) return {
       body: [
-        { type: 'required_status_checks', parameters: {
+        { type: 'required_status_checks', ruleset_id: rulesetIdentity === 'missing' ? undefined : 101,
+          ruleset_source_type: 'Repository', ruleset_source: REPO, parameters: {
           required_status_checks: ruleChecks.map((item) => item.context === CHECK ?
             { ...item, integration_id: rulesAppId } : item),
         } },
-        { type: 'pull_request', parameters: {
+        { type: 'pull_request', ruleset_id: 101,
+          ruleset_source_type: 'Repository', ruleset_source: REPO, parameters: {
           required_approving_review_count: 1,
           dismiss_stale_reviews_on_push: true,
           require_last_push_approval: true,
         } },
+        ...(extraRuleset ? [{ type: 'creation', ruleset_id: 102,
+          ruleset_source_type: 'Repository', ruleset_source: REPO }] : []),
       ], link: '',
+    };
+    if (path.endsWith('/rulesets/101')) return {
+      body: {
+        id: 101, target: 'branch', source_type: 'Repository', source: REPO,
+        enforcement: 'active',
+        ...(rulesetBypassActors === undefined ? {} : { bypass_actors: rulesetBypassActors }),
+      }, link: '',
+    };
+    if (path.endsWith('/rulesets/102')) return {
+      body: { id: 102, target: 'branch', source_type: 'Repository', source: REPO,
+        enforcement: 'active', bypass_actors: extraRulesetBypassActors }, link: '',
     };
     const workflow = /\/actions\/workflows\/(\d+)\/runs/.exec(path);
     if (workflow) {
@@ -209,6 +228,28 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     const okay = await collectGuardianConclusiveProvenance(base);
     assert.equal(okay.approvedCount, 1);
     assert.equal(okay.workflowProofs.length, 2);
+    assert.equal(okay.rulesetBypassActorsVerified, true);
+    for (const bypass_mode of ['always', 'pull_request', 'exempt']) {
+      rulesetBypassActors = [{ actor_type: 'RepositoryRole', actor_id: 5, bypass_mode }];
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_RULESET_BYPASS_ACTORS_PRESENT' });
+    }
+    rulesetBypassActors = undefined; // GitHub omits this without ruleset write access.
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_RULESET_BYPASS_ACTORS_UNOBSERVABLE' });
+    rulesetBypassActors = [];
+    extraRuleset = true;
+    const multipleOkay = await collectGuardianConclusiveProvenance(base);
+    assert.equal(multipleOkay.rulesetBypassActorsVerified, true);
+    extraRulesetBypassActors = [{ actor_type: 'User', actor_id: 77, bypass_mode: 'always' }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_RULESET_BYPASS_ACTORS_PRESENT' });
+    extraRuleset = false;
+    extraRulesetBypassActors = [];
+    rulesetIdentity = 'missing';
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED' });
+    rulesetIdentity = 'valid';
     rulesAppId = 1000;
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_REQUIRED_CHECK_APP_NOT_PINNED' });

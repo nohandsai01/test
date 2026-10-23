@@ -149,6 +149,36 @@ function branchRulesEvidence(rules, appId, minimumApprovals, expectedEvidence) {
   'GUARDIAN_GITHUB_REVIEW_PROTECTION_NOT_ENFORCED');
 }
 
+async function rulesetBypassEvidence(rules, token) {
+  // Effective branch rules identify the rulesets that GitHub applies to main,
+  // but do not expose the actors permitted to bypass those rules. Never
+  // confuse an omitted bypass_actors property with an empty list: GitHub
+  // deliberately hides it from installations without ruleset write access.
+  const ids = new Set();
+  for (const rule of rules) {
+    requireProof(object(rule) && positive(rule.ruleset_id) &&
+      rule.ruleset_source_type === 'Repository' &&
+      rule.ruleset_source === 'nohandsai01/test',
+    'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED');
+    ids.add(rule.ruleset_id);
+  }
+  requireProof(ids.size > 0, 'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED');
+  for (const id of ids) {
+    const response = await readGuardianGithubJson(PREFIX + '/rulesets/' + id,
+      token);
+    requireProof(!nextPage(response.link) && object(response.body) &&
+      response.body.id === id && response.body.target === 'branch' &&
+      response.body.source_type === 'Repository' &&
+      response.body.source === 'nohandsai01/test' &&
+      response.body.enforcement === 'active',
+    'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED');
+    requireProof(Array.isArray(response.body.bypass_actors),
+      'GUARDIAN_RULESET_BYPASS_ACTORS_UNOBSERVABLE');
+    requireProof(response.body.bypass_actors.length === 0,
+      'GUARDIAN_RULESET_BYPASS_ACTORS_PRESENT');
+  }
+}
+
 function validateTouchedFiles(files) {
   requireProof(files.length > 0, 'GUARDIAN_PR_NO_CHANGED_FILES');
   const seen = new Set();
@@ -231,6 +261,7 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
   validateTouchedFiles(files);
   branchRulesEvidence(rules.body, guardianAppId, releasePolicy.minApprovals,
     expectedEvidence);
+  await rulesetBypassEvidence(rules.body, installationToken);
   const approvedCount = reviewEvidence(reviews, releasePolicy, pr.author.id, headSha);
 
   const workflowProofs = [];
@@ -252,6 +283,7 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
   }
   return Object.freeze({ approvedCount, lastCommitSha: headSha,
     workflowProofs, rulesetBoundToGuardianApp: true,
+    rulesetBypassActorsVerified: true,
     changedFileCount: files.length });
 }
 

@@ -303,7 +303,8 @@ async function processVerifiedGuardianTarget(parsed, host) {
         appId: host.guardianAppId,
         explicitFullModeGrant: 'GUARDIAN_HOST_EXPLICIT_FULL_MODE',
         summary: 'Independent signed policy, exact-head approval, GitHub Actions ' +
-          'workflow job associations and protected-branch App binding verified.',
+          'workflow job associations, required-check App bindings, and explicitly ' +
+          'empty active ruleset bypass-actor lists verified at read time.',
       });
       return hold('SUCCESS_CHECK_RECORDED_RELEASE_HOLD', {
         deliveryId: parsed.deliveryId, checkRunId: receipt.checkRunId,
