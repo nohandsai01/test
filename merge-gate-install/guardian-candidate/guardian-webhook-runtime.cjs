@@ -157,6 +157,12 @@ async function processGuardianReconciliation({ pullNumber, headSha, host,
 }
 
 async function processVerifiedGuardianTarget(parsed, host) {
+  // Reject conflicting raw switches even if only one authorization grant is
+  // present. Authorization must not silently resolve a mixed host setting.
+  if (host.enableFullCheckWrites === true &&
+      host.enableFailureCheckWrites === true) {
+    return hold('FEATURE_OFF', { deliveryId: parsed.deliveryId });
+  }
   const fullMode = host.enableFullCheckWrites === true &&
     host.founderAuthorizedFullMode === 'EXPLICIT_FULL_CHECK_WRITES';
   const failureOnlyMode = host.enableFailureCheckWrites === true &&

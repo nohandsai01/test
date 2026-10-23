@@ -410,9 +410,14 @@ check-run pagination:
    numeric workflow ID, same commit/check-suite, expected event and successful
    completion; a job in its latest run attempt has the exact check-run URL/ID,
    name, SHA and successful conclusion. Ambiguous or truncated lists HOLD.
-4. GitHub's active branch rules for `main` must contain exactly one required
-   `NO HANDS Merge Gate Required Check`, pinned to the expected Guardian App's
-   numeric integration ID. The active PR review rule must independently
+4. GitHub's active branch rules for `main` must independently require all
+   **three** uniquely pinned contexts: `NO HANDS Merge Gate Required Check`
+   from the expected Guardian App, plus both signed `tests` and `ci` check names
+   from their respective signed issuer App IDs. A missing, duplicate, or
+   differently sourced underlying required check HOLDS even when its current
+   GitHub Check Run is green. This makes GitHub's native required checks the
+   continuing enforcement boundary if the same commit's CI is rerun after the
+   Guardian issues a point-in-time `success`. The active PR review rule must independently
    require at least the signed minimum approvals, dismiss stale approvals on
    new pushes, and require approval by someone other than the last pusher.
    Missing rules, unpinned check names and malformed responses HOLD. The PR
@@ -436,7 +441,8 @@ Two mutually exclusive runtime modes are defined:
   A PR containing protected source changes is a terminal per-head violation
   and receives `failure`. It additionally needs `stores.conclusionStore` and an
   App installation with `actions:read`. Both modes OFF by default; enabling
-  both is rejected. Runtime activation requires a separate Founder decision.
+  both is rejected **even if only one of the two grants is present**. Runtime
+  activation requires a separate Founder decision.
 
 Reviewers' commit-SHA binding and the final PR-commit SHA establish which
 **content** was reviewed after the latest code change. They do not by
@@ -480,8 +486,10 @@ Before any active GitHub App integration, separately prove:
 2. fresh direct GitHub API reads, complete pagination, and exact-head re-read;
 3. check-run origin, workflow/run association, last-push and review provenance
    (matching only the App ID is insufficient);
-4. protected-branch ruleset binding the single
-   `NO HANDS Merge Gate Required Check` to the expected dedicated Guardian App;
+4. protected-branch ruleset requiring all three distinct checks: the Guardian
+   context pinned to its dedicated App, plus the signed Tests and CI contexts
+   each pinned to its signed issuer App; GitHub must continue enforcing the
+   underlying checks even after Guardian has written `success`;
 5. separate Founder authorization to install, activate, merge, or deploy.
 
 The `success` check here is deliberately stricter than GitHub's general

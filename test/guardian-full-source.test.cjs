@@ -104,6 +104,29 @@ test('owner reconciliation stays OFF without independent host authorization', as
   assert.equal(result.activationAllowed, false);
 });
 
+test('conflicting raw write switches HOLD before any external reservation', async () => {
+  let writes = 0;
+  const result = await processGuardianReconciliation({
+    pullNumber: 12, headSha: SHA, operatorSession: 'owner',
+    host: {
+      enableOwnerReconciliation: true,
+      ownerReconciliationGrant: 'EXPLICIT_OWNER_RECONCILIATION',
+      authorizeReconciliation: async () => true,
+      reconciliationRateLimiter: { allow: async () => true },
+      trustedInstallationId: 42,
+      enableFullCheckWrites: true,
+      founderAuthorizedFullMode: 'EXPLICIT_FULL_CHECK_WRITES',
+      enableFailureCheckWrites: true,
+      // Deliberately missing the failure-only grant: the old mode calculation
+      // would have incorrectly selected full mode.
+      deliveryStore: { reserveOnce: async () => { writes++; return true; } },
+    },
+  });
+  assert.equal(result.reason, 'FEATURE_OFF');
+  assert.equal(result.activationAllowed, false);
+  assert.equal(writes, 0);
+});
+
 test('conclusive provenance requires exact workflow jobs, reviewer and app-pinned rule', async () => {
   const collectorPath = require.resolve('../merge-gate-install/guardian-candidate/github-rest-collector.cjs');
   const provenancePath = require.resolve('../merge-gate-install/guardian-candidate/guardian-provenance.cjs');
@@ -111,6 +134,11 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
   const prior = collector.readGuardianGithubJson;
   let files = [{ filename: 'src/a.cjs', status: 'modified' }];
   let rulesAppId = 999;
+  let ruleChecks = [
+    { context: CHECK, integration_id: 999 },
+    { context: 'tests-run', integration_id: 777 },
+    { context: 'ci-run', integration_id: 778 },
+  ];
   collector.readGuardianGithubJson = async (path) => {
     if (path.includes('/pulls/12/commits')) return {
       body: [{ sha: SHA, author: { id: 111 }, committer: { id: 111 } }], link: '',
@@ -123,7 +151,8 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     if (path.includes('/rules/branches/main')) return {
       body: [
         { type: 'required_status_checks', parameters: {
-          required_status_checks: [{ context: CHECK, integration_id: rulesAppId }],
+          required_status_checks: ruleChecks.map((item) => item.context === CHECK ?
+            { ...item, integration_id: rulesAppId } : item),
         } },
         { type: 'pull_request', parameters: {
           required_approving_review_count: 1,
@@ -184,6 +213,17 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_REQUIRED_CHECK_APP_NOT_PINNED' });
     rulesAppId = 999;
+    ruleChecks = ruleChecks.filter((item) => item.context !== 'ci-run');
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_EVIDENCE_REQUIRED_CHECK_APP_NOT_PINNED' });
+    ruleChecks.push({ context: 'ci-run', integration_id: 779 });
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_EVIDENCE_REQUIRED_CHECK_APP_NOT_PINNED' });
+    ruleChecks[ruleChecks.length - 1].integration_id = 778;
+    ruleChecks.push({ context: 'ci-run', integration_id: 778 });
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_EVIDENCE_REQUIRED_CHECK_APP_NOT_PINNED' });
+    ruleChecks.pop();
     files = [{ filename: '.github/workflows/hijack.yml', status: 'added' }];
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });

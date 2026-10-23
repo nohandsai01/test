@@ -97,8 +97,19 @@ function reviewEvidence(reviews, release, authorId, headSha) {
   return approvals;
 }
 
-function branchRulesEvidence(rules, appId, minimumApprovals) {
+function branchRulesEvidence(rules, appId, minimumApprovals, expectedEvidence) {
   requireProof(Array.isArray(rules), 'GUARDIAN_BRANCH_RULES_UNAVAILABLE');
+  requireProof(Array.isArray(expectedEvidence) && expectedEvidence.length === 2 &&
+    new Set(expectedEvidence.map((item) => item?.type)).size === 2 &&
+    expectedEvidence.every((item) => object(item) &&
+      ['tests', 'ci'].includes(item.type) &&
+      typeof item.checkName === 'string' && item.checkName.length > 0 &&
+      item.checkName !== CHECK && positive(item.issuerAppId) &&
+      item.issuerAppId !== appId) &&
+    new Set(expectedEvidence.map((item) => item.checkName)).size === 2,
+  'GUARDIAN_SIGNED_REQUIRED_CHECK_BINDINGS_INVALID');
+  const requiredContexts = new Set([CHECK,
+    ...expectedEvidence.map((item) => item.checkName)]);
   const bindings = [];
   const reviewProtections = [];
   for (const rule of rules) {
@@ -112,10 +123,22 @@ function branchRulesEvidence(rules, appId, minimumApprovals) {
     requireProof(object(rule.parameters), 'GUARDIAN_BRANCH_RULES_MALFORMED');
     const list = rule.parameters.required_status_checks;
     requireProof(Array.isArray(list), 'GUARDIAN_BRANCH_RULES_MALFORMED');
-    bindings.push(...list.filter((item) => object(item) && item.context === CHECK));
+    bindings.push(...list.filter((item) =>
+      object(item) && requiredContexts.has(item.context)));
   }
-  requireProof(bindings.length === 1 && bindings[0].integration_id === appId,
+  const guardianBindings = bindings.filter((item) => item.context === CHECK);
+  requireProof(guardianBindings.length === 1 &&
+    guardianBindings[0].integration_id === appId,
     'GUARDIAN_REQUIRED_CHECK_APP_NOT_PINNED');
+  // The Guardian's success conclusion is a point-in-time snapshot. GitHub
+  // itself must also require both signed underlying workflows, so a same-SHA
+  // CI rerun failure cannot leave an old Guardian success as the sole gate.
+  for (const evidence of expectedEvidence) {
+    const matches = bindings.filter((item) => item.context === evidence.checkName);
+    requireProof(matches.length === 1 &&
+      matches[0].integration_id === evidence.issuerAppId,
+    'GUARDIAN_EVIDENCE_REQUIRED_CHECK_APP_NOT_PINNED');
+  }
   // GitHub must independently enforce reviews even after a positive check:
   // an approval can be dismissed later without changing the commit SHA.
   requireProof(reviewProtections.some((parameters) =>
@@ -206,7 +229,8 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
   requireProof(releasePolicy.reviewerIds.every((id) => !contributors.has(id)),
     'GUARDIAN_REVIEWER_IS_COMMIT_CONTRIBUTOR');
   validateTouchedFiles(files);
-  branchRulesEvidence(rules.body, guardianAppId, releasePolicy.minApprovals);
+  branchRulesEvidence(rules.body, guardianAppId, releasePolicy.minApprovals,
+    expectedEvidence);
   const approvedCount = reviewEvidence(reviews, releasePolicy, pr.author.id, headSha);
 
   const workflowProofs = [];
