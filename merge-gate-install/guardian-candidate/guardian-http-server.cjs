@@ -8,6 +8,7 @@
 
 const http = require('node:http');
 const { processGuardianDelivery } = require('./guardian-webhook-runtime.cjs');
+const { createGuardianOwnerHttpHandler } = require('./guardian-owner-http.cjs');
 
 const MAX_BODY_BYTES = 256_000;
 
@@ -44,10 +45,22 @@ function receiveBoundedBody(req) {
 
 function createGuardianHttpServer({ host }) {
   // `host` must be supplied by a separate protected runtime. Defaults OFF.
+  // Owner onboarding is independently opt-in, requires protected host
+  // dependencies, and does not enable webhook writes or launch authority.
+  const ownerHandler = host?.enableOwnerOnboardingRoutes === true ?
+    createGuardianOwnerHttpHandler({ host: host.ownerOnboarding }) : null;
   const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/healthz') {
       return sendJson(res, 200, { running: true,
         feature: 'OFF_OR_SOURCE_ONLY', releaseAuthority: 'NOT_ISSUED' });
+    }
+    if (ownerHandler) {
+      try {
+        if (await ownerHandler(req, res)) return;
+      } catch (_) {
+        return sendJson(res, 503, { status: 'INSTALLATION_HOLD',
+          activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
+      }
     }
     if (req.method !== 'POST' || req.url !== '/github/webhook') {
       return sendJson(res, 404, { error: 'NOT_FOUND' });
