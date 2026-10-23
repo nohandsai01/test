@@ -105,8 +105,11 @@ async function fetchIndependentlySignedPolicy({ authority, pullNumber, headSha }
   const config = verifiedAuthorityConfig(authority || {});
   const path = '/v1/guardian/signed-policies/' + pullNumber + '/' + headSha;
   const envelope = await readBoundedEnvelope(config.hostname, path);
-  const result = verifySignedPolicy(envelope, config.publicKeyPem);
-  assert(result.signatureChecked === true && result.headSha === headSha,
+  const result = verifySignedPolicy(envelope, config.publicKeyPem, {
+    requirePullBinding: true, expectedPullNumber: pullNumber,
+  });
+  assert(result.signatureChecked === true && result.headSha === headSha &&
+    result.pullNumber === pullNumber,
     'POLICY_SIGNATURE_SCOPE_OR_HEAD_INVALID');
   return {
     envelope, publicKeyPem: config.publicKeyPem,

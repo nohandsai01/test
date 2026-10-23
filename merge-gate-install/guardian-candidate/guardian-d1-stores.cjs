@@ -13,6 +13,7 @@ const crypto = require('node:crypto');
 const DELIVERY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const SHA = /^[0-9a-f]{40}$/;
+const PKCE = /^[A-Za-z0-9_-]{43}$/;
 
 class GuardianStoreError extends Error {
   constructor(code) { super(code); this.name = 'GuardianStoreError'; this.code = code; }
@@ -64,6 +65,55 @@ async function first(db, sql, params) {
 function createGuardianD1Stores(db) {
   d1(db);
   return Object.freeze({
+    oauthStore: Object.freeze({
+      async putIfAbsent({ stateSha256, browserSessionId,
+        installationStateSha256, installationId, setupAction,
+        codeVerifier, expiresAt }) {
+        assert(HASH.test(stateSha256) && HASH.test(installationStateSha256) &&
+          typeof browserSessionId === 'string' &&
+          /^[A-Za-z0-9_-]{16,256}$/.test(browserSessionId) &&
+          positiveInteger(installationId) &&
+          ['install', 'update'].includes(setupAction) &&
+          PKCE.test(codeVerifier) && isoUtc(expiresAt) &&
+          Date.parse(expiresAt) > Date.now() &&
+          Date.parse(expiresAt) <= Date.now() + 11 * 60_000,
+        'GUARDIAN_OAUTH_STATE_INVALID');
+        return (await run(db,
+          'INSERT OR IGNORE INTO guardian_owner_oauth_states ' +
+          '(state_hash, browser_session_hash, installation_state_hash, ' +
+          'installation_id, setup_action, code_verifier, expires_at) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [stateSha256, sha256(browserSessionId), installationStateSha256,
+            installationId, setupAction, codeVerifier, expiresAt])) === 1;
+      },
+      async takeOnce({ stateSha256, browserSessionId,
+        installationStateSha256, now }) {
+        assert(HASH.test(stateSha256) && HASH.test(installationStateSha256) &&
+          typeof browserSessionId === 'string' &&
+          /^[A-Za-z0-9_-]{16,256}$/.test(browserSessionId) && isoUtc(now),
+        'GUARDIAN_OAUTH_STATE_INVALID');
+        const ownerHash = sha256(browserSessionId);
+        // UPDATE is the atomic replay gate. A subsequent read is deliberately
+        // made only after changes=1; any read uncertainty fails closed.
+        const changed = await run(db,
+          'UPDATE guardian_owner_oauth_states SET consumed_at = ? ' +
+          'WHERE state_hash = ? AND browser_session_hash = ? AND ' +
+          'installation_state_hash = ? AND consumed_at IS NULL AND expires_at > ?',
+          [now, stateSha256, ownerHash, installationStateSha256, now]);
+        if (changed !== 1) return null;
+        const row = await first(db,
+          'SELECT installation_id, setup_action, code_verifier ' +
+          'FROM guardian_owner_oauth_states WHERE state_hash = ? ' +
+          'AND browser_session_hash = ? AND installation_state_hash = ? ' +
+          'AND consumed_at = ?',
+          [stateSha256, ownerHash, installationStateSha256, now]);
+        assert(row && positiveInteger(row.installation_id) &&
+          ['install', 'update'].includes(row.setup_action) &&
+          PKCE.test(row.code_verifier), 'GUARDIAN_OAUTH_CONSUMED_ROW_INVALID');
+        return Object.freeze({ installationId: row.installation_id,
+          setupAction: row.setup_action, codeVerifier: row.code_verifier });
+      },
+    }),
     intentStore: Object.freeze({
       async putIfAbsent({ stateSha256, ownerSessionId, expiresAt }) {
         assert(HASH.test(stateSha256) && typeof ownerSessionId === 'string' &&

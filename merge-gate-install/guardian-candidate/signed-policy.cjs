@@ -40,8 +40,13 @@ function rejected(reason) {
   };
 }
 
-function verifySignedPolicy(rawEnvelope, trustedPublicKeyPem) {
+function verifySignedPolicy(rawEnvelope, trustedPublicKeyPem, scope = {}) {
   try {
+    const requirePullBinding = scope && scope.requirePullBinding === true;
+    if (requirePullBinding && (!Number.isSafeInteger(scope.expectedPullNumber) ||
+        scope.expectedPullNumber <= 0)) {
+      return rejected('SIGNED_POLICY_EXPECTED_PULL_INVALID');
+    }
     if ((!Buffer.isBuffer(rawEnvelope) && typeof rawEnvelope !== 'string') ||
         typeof trustedPublicKeyPem !== 'string' || trustedPublicKeyPem.length > 10_000) {
       return rejected('POLICY_TRUST_ANCHOR_UNAVAILABLE');
@@ -61,10 +66,19 @@ function verifySignedPolicy(rawEnvelope, trustedPublicKeyPem) {
     }
 
     const signed = parseUniqueKeySourceLock(payloadBytes);
-    if (!fields(signed, ['schemaVersion', 'issuedAt', 'expiresAt', 'evidencePolicy']) ||
-        signed.schemaVersion !== 1 || !fields(signed.evidencePolicy,
+    const scopedV2 = fields(signed, ['schemaVersion', 'issuedAt', 'expiresAt',
+      'pullNumber', 'evidencePolicy']) && signed.schemaVersion === 2 &&
+      Number.isSafeInteger(signed.pullNumber) && signed.pullNumber > 0;
+    const legacyV1 = fields(signed,
+      ['schemaVersion', 'issuedAt', 'expiresAt', 'evidencePolicy']) &&
+      signed.schemaVersion === 1;
+    if ((!scopedV2 && !legacyV1) ||
+        (requirePullBinding && (!scopedV2 ||
+          signed.pullNumber !== scope.expectedPullNumber)) ||
+        !fields(signed.evidencePolicy,
           ['schemaVersion', 'repository', 'targetBranch', 'headSha', 'evidence'])) {
-      return rejected('SIGNED_POLICY_FIELDS_INVALID');
+      return rejected(requirePullBinding ? 'SIGNED_POLICY_PULL_NUMBER_UNBOUND' :
+        'SIGNED_POLICY_FIELDS_INVALID');
     }
     const policy = signed.evidencePolicy;
     if (policy.schemaVersion !== 1 || policy.repository !== 'nohandsai01/test' ||
@@ -104,6 +118,7 @@ function verifySignedPolicy(rawEnvelope, trustedPublicKeyPem) {
       payloadSha256: crypto.createHash('sha256').update(payloadBytes).digest('hex'),
       rawPolicy: Buffer.from(JSON.stringify(policy), 'utf8'),
       headSha: policy.headSha,
+      pullNumber: scopedV2 ? signed.pullNumber : null,
       trusted: false, activationAllowed: false,
     };
   } catch (_) {

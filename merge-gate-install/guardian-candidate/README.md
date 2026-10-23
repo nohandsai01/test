@@ -197,6 +197,84 @@ configured, and this batch does not call `.listen()`, perform live payments,
 submit installation requests or run tests. The only possible host-written
 Check Run remains a Founder-opted-in **failure**; there is no PASS writer.
 
+### G7 — GitHub App OAuth bridge + exact-PR policy scope
+
+The G7 module `guardian-owner-oauth.cjs` connects the two **different**
+GitHub redirects. It does not start a listener or install an App:
+
+1. The trusted host starts with `beginGuardianInstallation(...)` and retains
+   `stateForHostCookie` in a **Secure, HttpOnly, SameSite=Lax** first-party
+   cookie alongside its own unguessable browser session. GitHub does **not**
+   promise to echo install-link `state` to the **Setup URL**. Do not trust
+   callback query parameters as the original installation state.
+2. The protected **Setup URL** handler reads that cookie and session, then
+   calls `beginGuardianSetupOAuth(...)` with the untrusted GitHub
+   `installation_id`/`setup_action`. The D1 `oauthStore` atomically persists
+   a separate ten-minute OAuth state and PKCE verifier bound to the same
+   browser session and installation-state hashes. The browser is redirected
+   to the fixed GitHub OAuth authorization URL.
+3. The separate **OAuth Callback URL** handler calls
+   `completeGuardianSetupOAuth(...)` with returned `state`/`code` and the
+   original protected cookies. D1 consumes the OAuth state **before** the
+   HTTPS authorization-code exchange with PKCE. The GitHub `ghu_` user token
+   is held only in memory for the owner `/user` and App/repository API
+   cross-checks; the original install intent is consumed separately before
+   writing an inert verified binding. Duplicate, mismatched, expired, or
+   uncertain state transitions HOLD. No token is written to D1.
+
+Source-only host integration sketch:
+
+```js
+const { beginGuardianSetupOAuth, completeGuardianSetupOAuth } =
+  require('./guardian-owner-oauth.cjs');
+const stores = createGuardianD1Stores(protectedGuardianD1Binding);
+
+// Setup URL, using a protected same-origin cookie and protected session:
+const authorization = await beginGuardianSetupOAuth({
+  installationState: installationStateFromHostCookie,
+  installationId: untrustedSetupInstallationId,
+  setupAction: untrustedSetupAction,
+  browserSessionId: protectedBrowserSessionId,
+  clientId: protectedClientId, redirectUri: pinnedHttpsOAuthCallback,
+  oauthStore: stores.oauthStore,
+});
+
+// OAuth Callback URL, using those SAME protected cookies/session:
+const outcome = await completeGuardianSetupOAuth({
+  state: oauthQueryState, code: oauthQueryCode,
+  installationState: installationStateFromHostCookie,
+  browserSessionId: protectedBrowserSessionId,
+  oauthStore: stores.oauthStore, intentStore: stores.intentStore,
+  installationStore: stores.installationStore,
+  clientId: protectedClientId, clientSecret: protectedClientSecret,
+  redirectUri: pinnedHttpsOAuthCallback, appId: protectedNumericAppId,
+  privateKeyPem: protectedAppRsaKey,
+  expectedOwnerAccountId: protectedNumericOwnerId,
+});
+// outcome.activated is always false, including when an owner is verified.
+```
+
+The host still needs to implement session/cookie issuance, HTTPS routes,
+CSRF and rate limiting, and register a real GitHub App. This source assumes
+the **Setup URL then OAuth** mode; GitHub's “Request user authorization on
+install” option instead uses the OAuth callback and cannot simultaneously
+configure a Setup URL. No App or OAuth credentials are provided here.
+
+G7 also closes a separate policy scope gap: the independent authority's
+Ed25519-signed **payload** must now contain `schemaVersion: 2` and
+`pullNumber: <exact numeric PR>` alongside `issuedAt`, `expiresAt`, and the
+existing v1 `evidencePolicy`. Both the remote policy fetch and the evidence
+reader require the matching PR number. A signature only bound to a shared
+Commit SHA (legacy v1), or signed for a different PR, cannot be used on that
+runtime path. This still cannot establish independent signer custody or
+release authority without separate operational evidence.
+
+Official OAuth references:
+
+- https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url
+- https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
+- https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url
+
 Source-only integration still needs the independently operated service host,
 registered GitHub App identity, verified installer account binding, durable
 data store, rate limits, observability, approved keys, active branch ruleset,

@@ -11,6 +11,20 @@ CREATE TABLE IF NOT EXISTS guardian_install_intents (
   consumed_at TEXT
 ) STRICT;
 
+-- G7 OAuth PKCE exchange bridge. Stores only an ephemeral verifier, never
+-- a GitHub user access/refresh token or OAuth client secret. OAuth state
+-- remains a tombstone after consumption, including if GitHub rejects code.
+CREATE TABLE IF NOT EXISTS guardian_owner_oauth_states (
+  state_hash TEXT PRIMARY KEY NOT NULL CHECK (length(state_hash) = 64),
+  browser_session_hash TEXT NOT NULL CHECK (length(browser_session_hash) = 64),
+  installation_state_hash TEXT NOT NULL CHECK (length(installation_state_hash) = 64),
+  installation_id INTEGER NOT NULL CHECK (installation_id > 0),
+  setup_action TEXT NOT NULL CHECK (setup_action IN ('install', 'update')),
+  code_verifier TEXT NOT NULL CHECK (length(code_verifier) = 43),
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS guardian_installation_bindings (
   installation_id INTEGER PRIMARY KEY NOT NULL CHECK (installation_id > 0),
   app_id INTEGER NOT NULL CHECK (app_id > 0),
