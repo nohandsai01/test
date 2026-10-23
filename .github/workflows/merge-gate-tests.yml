@@ -1,0 +1,55 @@
+# STAGED: not an approved or required Merge Gate check issuer.
+# Push evidence stays path-scoped. PR fallback covers otherwise missing required checks.
+name: NO HANDS Merge Gate Tests (staged)
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'docs/**'
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    # Never execute tests on this Draft delivery. Skipped jobs are not Guardian evidence.
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    name: NO HANDS Merge Gate / Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Require committed test cases and execute them
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d test ]]; then
+            echo '::error::Committed test/ directory is missing.'
+            exit 1
+          fi
+          list_file="$(mktemp)"
+          trap 'rm -f "$list_file"' EXIT
+          if ! find test -type f \( -name '*.test.cjs' -o -name '*.test.js' -o -name '*.test.mjs' \) -print0 > "$list_file"; then
+            echo '::error::Unable to enumerate the committed test suite.'
+            exit 1
+          fi
+          mapfile -d '' test_files < "$list_file"
+          if (( ${#test_files[@]} == 0 )); then
+            echo '::error::No committed .test.{cjs,js,mjs} files; rejecting empty green evidence.'
+            exit 1
+          fi
+          node --test "${test_files[@]}"
