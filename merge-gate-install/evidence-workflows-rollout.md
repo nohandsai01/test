@@ -10,11 +10,15 @@ activation, Merge, Deploy, payments, or launch.
 
 Both workflows trigger on `push` changing `src/**`, `test/**`, or `docs/**`.
 This remains the **only** event accepted as Guardian's signed `event: push`
-evidence. A `pull_request` fallback (for `main`, with `paths-ignore` for those
-three eligible roots) supplies ordinary required-check contexts for PRs that
-otherwise cannot produce push evidence. The fallback runs only when the PR is
-non-Draft. If a PR combines eligible and protected files, both events may run;
-Guardian must still reject protected changes, independent of any green job.
+evidence. A `pull_request` fallback covers **all PRs targeting `main`**,
+including eligible-only fork PRs and protected-only PRs, without path filters.
+Its `edited` event also covers retargeting an existing PR to `main` without
+new commits. PR-event jobs run only for non-Draft PRs; a separate eligible-root
+`push` on an in-repository branch may still run even if its PR is Draft.
+Same-repository eligible changes can produce both events. Only verified,
+exact-head signed `push` evidence qualifies for Guardian; PR-event checks and
+skipped jobs are never substitutes. Guardian independently rejects protected
+changes, regardless of the displayed GitHub check conclusion.
 They have different workflow IDs and check names. Their issuer is normally
 GitHub Actions (the same App ID for both), which must differ from Guardian's
 independently hosted App ID. Action references are immutable, checkout binds
@@ -32,15 +36,26 @@ contract are committed. Do not make `scripts.ci` silently pass or rerun the
 same test suite in place of a meaningful separate CI task.
 **No green test or CI result is asserted here.**
 
-**Required-check caveat:** GitHub leaves path-filtered required checks Pending
-for skipped events. The PR fallback addresses protected-only changes but is
-not sufficient to authorize them: Guardian independently rejects any diff
-outside `src/`, `test/`, `docs/`, and a Draft skipped check is never proof.
+**Required-check caveat:** GitHub leaves workflow-level path-filtered
+required checks Pending when skipped; job-level Draft skips can display Success
+for branch protection but are **not** valid Guardian evidence. The unfiltered
+PR fallback provides check contexts for every PR path class targeting `main`,
+but fork PR runs may await maintainer approval or be unavailable by repository
+policy. Guardian independently rejects diffs outside `src/`, `test/`, `docs/`.
 The Ruleset applies to all PRs targeting `main`, not conditionally by file.
 Before activation, separately verify that each expected non-Draft PR class
 produces the intended check context and that exact-head signed push evidence
 remains mandatory for Guardian PASS. Treat missing, stale, or skipped checks as
 HOLD, never as successful source evidence.
+
+## Merge Queue exclusion (current staging)
+
+No `merge_group` event is configured. **GitHub Merge Queue is not supported by
+this staged workflow and is outside this activation scope.** Do not enable
+Merge Queue while expecting these two checks to provide queue-head evidence.
+A future separately authorized change must design and verify queue-specific
+triggering, checkout SHA binding, check identity, and Guardian attestation;
+`pull_request` results must never be treated as signed `push` or queue evidence.
 
 ## Separate owner-authorized activation gate
 
