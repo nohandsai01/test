@@ -9,6 +9,9 @@ const { verifySignedPolicy } = require('./signed-policy.cjs');
 const { collectAuthenticatedGithubSnapshot, CollectorError } =
   require('./github-rest-collector.cjs');
 const { inspectEvidenceSnapshot } = require('./evidence-snapshot.cjs');
+const { parseUniqueKeySourceLock } = require('../candidate/verify-source-lock.cjs');
+const { collectGuardianConclusiveProvenance, GuardianProvenanceError } =
+  require('./guardian-provenance.cjs');
 
 function hold(reason, details = {}) {
   return {
@@ -40,7 +43,8 @@ async function readAndEvaluateGuardianCandidate(input) {
   }
   const {
     pullNumber, signedPolicyEnvelope, trustedPolicyPublicKeyPem,
-    githubAppInstallationToken,
+    githubAppInstallationToken, requireConclusiveEvidence = false,
+    expectedGuardianAppId,
   } = input;
   const verification = verifySignedPolicy(signedPolicyEnvelope,
     trustedPolicyPublicKeyPem, {
@@ -64,6 +68,44 @@ async function readAndEvaluateGuardianCandidate(input) {
   }
   const shape = inspectEvidenceSnapshot(verification.rawPolicy,
     Buffer.from(JSON.stringify(snapshot), 'utf8'));
+  if (requireConclusiveEvidence === true) {
+    if (shape.findings.length) return hold('GITHUB_EVIDENCE_REJECTED', {
+      evidenceFindings: shape.findings, signedPolicySha256: verification.payloadSha256,
+    });
+    if (!verification.releasePolicy ||
+        verification.releasePolicy.guardianAppId !== expectedGuardianAppId) {
+      return hold('SIGNED_CONCLUSIVE_POLICY_MISSING_OR_APP_MISMATCH');
+    }
+    let provenance;
+    try {
+      const expectedEvidence = parseUniqueKeySourceLock(verification.rawPolicy).evidence;
+      provenance = await collectGuardianConclusiveProvenance({
+        pullNumber, headSha: verification.headSha,
+        installationToken: githubAppInstallationToken, snapshot,
+        expectedEvidence, releasePolicy: verification.releasePolicy,
+        guardianAppId: expectedGuardianAppId,
+      });
+      // Exact-head second read ensures a changing PR/check page cannot be
+      // silently promoted after review/workflow/ruleset evidence is collected.
+      const reread = await collectAuthenticatedGithubSnapshot({
+        pullNumber, expectedHeadSha: verification.headSha,
+        installationToken: githubAppInstallationToken,
+      });
+      if (JSON.stringify(reread) !== JSON.stringify(snapshot)) {
+        return hold('GUARDIAN_SNAPSHOT_CHANGED_BEFORE_CHECK_WRITE');
+      }
+    } catch (error) {
+      return hold(error instanceof GuardianProvenanceError ? error.code :
+        error instanceof CollectorError ? error.code :
+          'GUARDIAN_PROVENANCE_UNVERIFIED');
+    }
+    return hold('EVIDENCE_CONCLUSIVE_CANDIDATE', {
+      eligibleForSuccess: true, // Not an activation permission by itself.
+      signedPolicySha256: verification.payloadSha256,
+      observedHeadSha: verification.headSha,
+      provenance,
+    });
+  }
   return hold(shape.findings.length ? 'GITHUB_EVIDENCE_REJECTED' :
     'EVIDENCE_SHAPE_MATCH_ONLY', {
     signedPolicySha256: verification.payloadSha256,

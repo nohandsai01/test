@@ -163,7 +163,7 @@ function createAppJwt({ appId, privateKeyPem, now = Date.now() }) {
 
 /** Token never leaves the trusted host except as an Authorization header. */
 async function mintScopedInstallationToken({ appId, installationId, privateKeyPem,
-  expectedRepositoryId }) {
+  expectedRepositoryId, requireActionsRead = false }) {
   assert(Number.isSafeInteger(installationId) && installationId > 0,
     'GUARDIAN_INSTALLATION_ID_INVALID');
   assert(Number.isSafeInteger(expectedRepositoryId) && expectedRepositoryId > 0,
@@ -173,13 +173,15 @@ async function mintScopedInstallationToken({ appId, installationId, privateKeyPe
   const response = await githubJson('POST', '/app/installations/' + installationId +
     '/access_tokens', jwt, {
     repositories: ['test'],
-    permissions: { checks: 'write', pull_requests: 'read' },
+    permissions: { checks: 'write', pull_requests: 'read',
+      ...(requireActionsRead === true ? { actions: 'read' } : {}) },
   });
   assert(typeof response.token === 'string' && response.token.length >= 16 &&
     typeof response.expires_at === 'string' &&
     Date.parse(response.expires_at) > Date.now() + 60_000 &&
     isRecord(response.permissions) && response.permissions.checks === 'write' &&
     response.permissions.pull_requests === 'read' &&
+    (requireActionsRead !== true || response.permissions.actions === 'read') &&
     Array.isArray(response.repositories) && response.repositories.length === 1 &&
     isRecord(response.repositories[0]) &&
     response.repositories[0].full_name === 'nohandsai01/test' &&
@@ -198,7 +200,7 @@ async function mintScopedInstallationToken({ appId, installationId, privateKeyPe
  */
 async function revalidateCurrentInstallationScope({ appId, installationId,
   privateKeyPem, installationToken, expectedOwnerAccountId,
-  expectedRepositoryId }) {
+  expectedRepositoryId, requireActionsRead = false }) {
   assert(Number.isSafeInteger(installationId) && installationId > 0 &&
     Number.isSafeInteger(expectedOwnerAccountId) && expectedOwnerAccountId > 0 &&
     Number.isSafeInteger(expectedRepositoryId) && expectedRepositoryId > 0,
@@ -224,7 +226,9 @@ async function revalidateCurrentInstallationScope({ appId, installationId,
     isRecord(entry.permissions) &&
     entry.permissions.checks === 'write' &&
     entry.permissions.pull_requests === 'read' &&
-    Array.isArray(entry.events) && entry.events.includes('pull_request');
+    (requireActionsRead !== true || entry.permissions.actions === 'read') &&
+    Array.isArray(entry.events) && entry.events.includes('pull_request') &&
+    (requireActionsRead !== true || entry.events.includes('pull_request_review'));
   assert(matchingInstallation(installation) &&
     matchingInstallation(repositoryInstallation) &&
     isRecord(repository.owner) &&
@@ -258,6 +262,34 @@ async function postFailureOnlyCheck({ token, headSha, summary }) {
   return { checkRunId: result.id, headSha, conclusion: 'failure' };
 }
 
+/**
+ * Intentionally separate from the original failure-only function. A positive
+ * Check Run is only usable when the independent host supplies a protected
+ * full-mode grant AND its evaluator has collected the signed v3 provenance.
+ * No default caller reaches this function and importing it writes nothing.
+ */
+async function postConclusiveSuccessCheck({ token, headSha, summary, appId,
+  explicitFullModeGrant }) {
+  assert(explicitFullModeGrant === 'GUARDIAN_HOST_EXPLICIT_FULL_MODE' &&
+    Number.isSafeInteger(appId) && appId > 0 &&
+    typeof headSha === 'string' && SHA.test(headSha) &&
+    typeof summary === 'string' && summary.length > 0 &&
+    summary.length <= 3000 && /^[\x20-\x7e\n]+$/.test(summary),
+  'GUARDIAN_SUCCESS_CHECK_NOT_AUTHORIZED');
+  const result = await githubJson('POST', '/repos/nohandsai01/test/check-runs', token, {
+    name: 'NO HANDS Merge Gate Required Check', head_sha: headSha,
+    status: 'completed', conclusion: 'success',
+    output: { title: 'Guardian exact-head requirements satisfied', summary },
+  });
+  assert(Number.isSafeInteger(result.id) && result.id > 0 &&
+    result.name === 'NO HANDS Merge Gate Required Check' &&
+    result.head_sha === headSha && result.conclusion === 'success' &&
+    isRecord(result.app) && result.app.id === appId,
+  'GUARDIAN_SUCCESS_CHECK_RECEIPT_INVALID');
+  return { checkRunId: result.id, headSha, conclusion: 'success' };
+}
+
 module.exports = { createAppJwt, mintScopedInstallationToken,
   postFailureOnlyCheck, verifyOwnerInstallationBinding,
-  revalidateCurrentInstallationScope, GuardianApiError };
+  postConclusiveSuccessCheck, revalidateCurrentInstallationScope,
+  GuardianApiError };

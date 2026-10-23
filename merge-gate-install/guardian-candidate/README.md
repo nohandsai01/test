@@ -363,12 +363,116 @@ G9 does **not** add a success writer, change an environment flag, start a
 listener, deploy, migrate D1, install an App, merge or execute any tests.
 Feature OFF / Launch HOLD remain binding.
 
+### G10 — complete SUCCESS / FAILURE source candidate (default OFF)
+
+Founder authorization on 2026-10-23 covers **writing the inactive source**,
+not activating the GitHub App, configuring branch protection or issuing a
+positive live Check Run. This batch extends the *same* PR #9 source chain.
+No new runtime is created, no `.listen()` occurs, no D1 migration is applied,
+no workflow is installed, and no Check Run is submitted by the code delivery.
+
+The independent signer can issue a **v3** policy payload (v1/v2 remain valid
+only for fail-closed/failure-only inspection). v3 preserves the v2 signed
+`pullNumber` and `evidencePolicy`, and additionally requires a signed
+`releasePolicy` with exactly:
+
+```json
+{
+  "schemaVersion": 1,
+  "guardianAppId": 12345,
+  "reviewerIds": [123456],
+  "minApprovals": 1,
+  "workflows": [
+    {"type": "tests", "workflowId": 11111, "event": "push"},
+    {"type": "ci", "workflowId": 22222, "event": "push"}
+  ]
+}
+```
+
+**All numbers above are invalid as operational approvals or host trust IDs**;
+they are only syntax examples. The operator must independently pin the real
+numeric identities and Ed25519 public-key fingerprint. A GitHub Check Run
+cannot choose its own evidence issuer or reviewer allowlist.
+
+`guardian-provenance.cjs` now checks the following on authenticated GitHub
+REST reads, in addition to the original exact-head signed policy and complete
+check-run pagination:
+
+1. The PR is open, non-Draft, and has the signed exact head SHA. The final
+   entry in the complete PR commit list matches the same SHA. The full changed
+   file list is under `src/`, `test/` or `docs/` only; PR-supplied workflows,
+   Guardian policy code and other protected files are not eligible to PASS.
+2. A sufficient number of independently pinned reviewers have a **latest**
+   `APPROVED` review on that exact SHA. The PR author and any GitHub-attributed
+   commit contributor are excluded. Newer `CHANGES_REQUESTED` reviews HOLD.
+3. For each signed `tests` and `ci` mapping, the successful Check Run has the
+   exact name and issuer App ID; a GitHub Actions workflow run has the signed
+   numeric workflow ID, same commit/check-suite, expected event and successful
+   completion; a job in its latest run attempt has the exact check-run URL/ID,
+   name, SHA and successful conclusion. Ambiguous or truncated lists HOLD.
+4. GitHub's active branch rules for `main` must contain exactly one required
+   `NO HANDS Merge Gate Required Check`, pinned to the expected Guardian App's
+   numeric integration ID. The active PR review rule must independently
+   require at least the signed minimum approvals, dismiss stale approvals on
+   new pushes, and require approval by someone other than the last pusher.
+   Missing rules, unpinned check names and malformed responses HOLD. The PR
+   and Check Runs are re-read after provenance checks.
+5. Immediately before egress, the host revalidates the installed, selected,
+   unsuspended App/repository scope, now also with `actions:read` permission,
+   and rechecks policy signature/expiry. A durable D1 reservation keyed by
+   `(repository_id, pull_number, head_sha)` prevents conflicting conclusions
+   from separate webhook delivery IDs. Uncertain writes require reconciliation.
+
+Two mutually exclusive runtime modes are defined:
+
+- Existing `enableFailureCheckWrites: true` plus
+  `founderAuthorizedFailureOnly: 'EXPLICIT_FAILURE_ONLY'`: previous
+  FAILURE-only behavior; **never** issues SUCCESS.
+- New `enableFullCheckWrites: true` plus
+  `founderAuthorizedFullMode: 'EXPLICIT_FULL_CHECK_WRITES'`: can issue
+  `success` **only** after every v3 provenance condition passes. Missing,
+  transient or pending evidence leaves the required check absent (HOLD), so
+  subsequent eligible review or workflow webhooks can retry the same SHA.
+  A PR containing protected source changes is a terminal per-head violation
+  and receives `failure`. It additionally needs `stores.conclusionStore` and an
+  App installation with `actions:read`. Both modes OFF by default; enabling
+  both is rejected. Runtime activation requires a separate Founder decision.
+
+Reviewers' commit-SHA binding and the final PR-commit SHA establish which
+**content** was reviewed after the latest code change. They do not by
+themselves prove a wall-clock GitHub push timestamp or prevent revocation
+between final GET and POST. Operational event custody, independent signer
+control, credential custody, D1 provisioning, GitHub App installation,
+branch-rule setup, reviewer membership and separate release authorization
+remain external acceptance gates.
+
+The host must subscribe to authenticated `pull_request` and
+`pull_request_review` events; `workflow_run.completed` is also understood
+when GitHub supplies exactly one linked PR. `workflow_run` events with no
+linked PR cannot safely identify a target and HOLD. In deployments where
+GitHub Actions push runs have empty `pull_requests`, an independently trusted
+reconciliation trigger is needed after CI completion. This source provides
+`processGuardianReconciliation(...)` for that case, separately gated by
+`enableOwnerReconciliation: true`,
+`ownerReconciliationGrant: 'EXPLICIT_OWNER_RECONCILIATION'`, a protected
+`authorizeReconciliation(...)` callback, and a durable
+`reconciliationRateLimiter.allow(...)`. These are **all absent/OFF** in this
+delivery. It generates an internal single-use delivery ID only after owner
+authentication and independently verifies the signed PR/head via GitHub.
+It does not expose a public reconcile route, infer a PR from a branch name,
+schedule background polling, or create operator authentication.
+
+Relevant GitHub endpoints: `/pulls/{n}/commits`, `/pulls/{n}/reviews`,
+`/pulls/{n}/files`, `/actions/workflows/{id}/runs`,
+`/actions/runs/{id}/jobs`, `/rules/branches/main`, and `/check-runs`.
+
 ## Non-negotiable missing authority
 
-Even when every field matches, output remains `trusted=false`,
-`activationAllowed=false`, `hostedCheckEvidence=NOT_VERIFIED` and
-`authoritativeRequiredCheck=NOT_ISSUED`. The only possible positive source
-label is `SNAPSHOT_SHAPE_MATCH_ONLY`, not `PASS`.
+In the current **default-OFF source delivery**, output remains
+`activationAllowed=false` and no authoritative hosted Check Run is issued.
+The G10 positive evidence label `EVIDENCE_CONCLUSIVE_CANDIDATE` is still
+`trusted=false`, `authoritativeRequiredCheck=NOT_ISSUED` until the separately
+authorized runtime actually publishes and receives a verified receipt.
 
 Before any active GitHub App integration, separately prove:
 
@@ -393,5 +497,9 @@ Official references:
 - https://docs.github.com/en/apps/creating-github-apps/writing-code-for-a-github-app/building-ci-checks-with-a-github-app
 - https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches
 
-No tests, QA, demo, hosted CI, deployment, or real payment is performed in
-this delivery batch.
+G10 source completion: five focused offline tests passed (5/5), with no
+network or real Check Run writes. One existing candidate test in the earlier
+combined run was blocked by this executor's read-only `/tmp` (`EROFS`), not by
+a code assertion; it was not repeatedly rerun. No QA agent, hosted CI,
+App installation, D1 migration, deployment, merge, or real payment was
+performed in G10.

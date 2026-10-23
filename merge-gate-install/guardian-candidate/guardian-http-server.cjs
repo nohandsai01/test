@@ -82,11 +82,18 @@ function createGuardianHttpServer({ host }) {
       decision = { status: 'SOURCE_ONLY_HOLD', reason: 'UNHANDLED_HOST_ERROR' };
     }
     // Do not echo webhook inputs, secrets, installation tokens or policy data.
+    const checkRecorded = ['FAILURE_ONLY_CHECK_RECORDED',
+      'SUCCESS_CHECK_RECORDED_RELEASE_HOLD'].includes(decision.reason);
+    const acceptedHold = ['AWAITING_CONCLUSIVE_EXACT_HEAD_EVIDENCE',
+      'DELIVERY_DUPLICATE_OR_NOT_RESERVED',
+      'CONCLUSION_ALREADY_RESERVED_OR_UNRECONCILED'].includes(decision.reason);
     const status = decision.reason === 'WEBHOOK_SIGNATURE_INVALID' ? 401 :
       decision.reason === 'WEBHOOK_TARGET_OUT_OF_SCOPE' ? 422 :
-        decision.reason === 'FAILURE_ONLY_CHECK_RECORDED' ? 202 : 503;
+        (checkRecorded || acceptedHold) ? 202 : 503;
     return sendJson(res, status, {
-      status: 'SOURCE_ONLY_HOLD', reason: decision.reason,
+      status: checkRecorded ? 'CHECK_RUN_RECORDED_RELEASE_HOLD' :
+        acceptedHold ? 'ACCEPTED_NO_CHECK_RUN' : 'SOURCE_ONLY_HOLD',
+      reason: decision.reason,
       activationAllowed: false,
     });
   });
