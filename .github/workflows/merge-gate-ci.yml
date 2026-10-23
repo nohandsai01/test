@@ -1,0 +1,48 @@
+# STAGED: not an approved or required Merge Gate check issuer.
+# Workflow-only delivery does not match the path filter; no CI runs on push.
+name: NO HANDS Merge Gate CI (staged)
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: NO HANDS Merge Gate / CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Check committed JavaScript syntax (fail closed on empty inputs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d test ]]; then
+            echo '::error::Committed test/ directory is missing.'
+            exit 1
+          fi
+          roots=(test)
+          if [[ -d src ]]; then roots+=(src); fi
+          mapfile -d '' files < <(find "${roots[@]}" -type f \( -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \) -print0)
+          if (( ${#files[@]} == 0 )); then
+            echo '::error::No JavaScript source or tests; rejecting empty green evidence.'
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            node --check "$file"
+          done
