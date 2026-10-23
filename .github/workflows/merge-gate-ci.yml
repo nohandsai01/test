@@ -1,10 +1,17 @@
 # STAGED: not an approved or required Merge Gate check issuer.
-# Workflow-only delivery does not match the path filter; no CI runs on push.
+# Push evidence stays path-scoped. PR fallback covers otherwise missing required checks.
 name: NO HANDS Merge Gate CI (staged)
 
 on:
   push:
     paths:
+      - 'src/**'
+      - 'test/**'
+      - 'docs/**'
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    branches: [main]
+    paths-ignore:
       - 'src/**'
       - 'test/**'
       - 'docs/**'
@@ -14,6 +21,8 @@ permissions:
 
 jobs:
   ci:
+    # Never execute CI on this Draft delivery. Skipped jobs are not Guardian evidence.
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     name: NO HANDS Merge Gate / CI
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -21,7 +30,7 @@ jobs:
       - name: Checkout exact triggering commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Set up Node 24
@@ -38,7 +47,13 @@ jobs:
           fi
           roots=(test)
           if [[ -d src ]]; then roots+=(src); fi
-          mapfile -d '' files < <(find "${roots[@]}" -type f \( -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \) -print0)
+          list_file="$(mktemp)"
+          trap 'rm -f "$list_file"' EXIT
+          if ! find "${roots[@]}" -type f \( -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \) -print0 > "$list_file"; then
+            echo '::error::Unable to enumerate the committed JavaScript files.'
+            exit 1
+          fi
+          mapfile -d '' files < "$list_file"
           if (( ${#files[@]} == 0 )); then
             echo '::error::No JavaScript source or tests; rejecting empty green evidence.'
             exit 1
@@ -46,3 +61,17 @@ jobs:
           for file in "${files[@]}"; do
             node --check "$file"
           done
+      - name: Run independently defined project CI (fail closed if absent)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f package.json || ! -f package-lock.json ]]; then
+            echo '::error::CI requires committed package.json and package-lock.json.'
+            exit 1
+          fi
+          if ! node -e 'const p = require("./package.json"); if (typeof p.scripts?.ci !== "string" || p.scripts.ci.trim().length === 0) process.exit(1)'; then
+            echo '::error::Missing nonempty package.json scripts.ci; refusing syntax-only green.'
+            exit 1
+          fi
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run ci
