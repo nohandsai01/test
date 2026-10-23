@@ -42,7 +42,10 @@ async function readAndEvaluateGuardianCandidate(input) {
     pullNumber, signedPolicyEnvelope, trustedPolicyPublicKeyPem,
     githubAppInstallationToken,
   } = input;
-  const verification = verifySignedPolicy(signedPolicyEnvelope, trustedPolicyPublicKeyPem);
+  const verification = verifySignedPolicy(signedPolicyEnvelope,
+    trustedPolicyPublicKeyPem, {
+      requirePullBinding: true, expectedPullNumber: pullNumber,
+    });
   if (!verification.signatureChecked) {
     return hold(verification.reason || 'EXTERNAL_POLICY_NOT_VERIFIED');
   }

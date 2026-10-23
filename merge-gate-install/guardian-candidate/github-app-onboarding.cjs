@@ -38,6 +38,11 @@ async function beginGuardianInstallation({ appSlug, verifiedOwnerSessionId, inte
   return {
     status: 'INSTALLATION_LINK_ISSUED_NOT_AUTHORIZED',
     url: `https://github.com/apps/${appSlug}/installations/new?state=${state}`,
+    // The setup URL is distinct from the OAuth callback. GitHub does not
+    // promise to echo the install-link state to the setup URL. The trusted
+    // host must also retain this value in a Secure, HttpOnly, SameSite=Lax
+    // browser-session cookie and supply it to the later OAuth bridge.
+    stateForHostCookie: state,
     activated: false, installed: false, accountVerified: false,
   };
 }
