@@ -65,7 +65,7 @@ function checkSyntax(file) {
   if (result.error || result.status !== 0) fail(`JavaScript syntax invalid: ${path.relative(root, file)}`);
 }
 
-function checkLiteralRequires(file) {
+function checkLiteralRequires(file, tracked) {
   const code = fs.readFileSync(file, 'utf8');
   const localRequire = createRequire(file);
   const pattern = /\brequire\s*\(\s*(['"])([^'"\\\r\n]+)\1\s*\)/g;
@@ -84,7 +84,11 @@ function checkLiteralRequires(file) {
     if (!resolved.startsWith(`${root}${path.sep}`)) {
       fail(`import escapes repository: ${path.relative(root, file)}`);
     }
-    regularTrackedFile(path.relative(root, resolved));
+    const relativeResolved = path.relative(root, resolved);
+    if (!tracked.has(relativeResolved)) {
+      fail(`untracked relative import in ${path.relative(root, file)}: ${specifier}`);
+    }
+    regularTrackedFile(relativeResolved);
   }
 }
 
@@ -103,7 +107,7 @@ function main() {
   for (const relative of scripts) {
     const file = regularTrackedFile(relative);
     checkSyntax(file);
-    checkLiteralRequires(file);
+    checkLiteralRequires(file, tracked);
   }
   for (const relative of jsonFiles) {
     const file = regularTrackedFile(relative);
