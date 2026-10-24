@@ -8,7 +8,10 @@ activation, Merge, Deploy, payments, or launch.
 | Tests | `.github/workflows/merge-gate-tests.yml` | `NO HANDS Merge Gate / Tests` | Run all committed nested `*.test.cjs`, `*.test.js`, `*.test.mjs` files; reject empty or unenumerable suite. |
 | CI | `.github/workflows/merge-gate-ci.yml` | `NO HANDS Merge Gate / CI` | Check JS/CJS/MJS syntax with complete enumeration **and** execute an explicitly committed project `npm run ci`; reject missing inputs, lockfile, or CI command. |
 
-Both workflows trigger on `push` changing `src/**`, `test/**`, or `docs/**`.
+Both workflows trigger on `push` changing `src/**`, `test/**`, `docs/**`,
+`merge-gate-install/**`, either root package file, `nohands.yml`, or either
+Merge Gate Tests/CI workflow file. This includes policy and workflow edits so
+that their corresponding source evidence cannot silently remain stale.
 This remains the **only** event accepted as Guardian's signed `event: push`
 evidence. A `pull_request` fallback covers **all PRs targeting `main`**,
 including eligible-only fork PRs and protected-only PRs, without path filters.
@@ -25,10 +28,13 @@ independently hosted App ID. Action references are immutable, checkout binds
 to the triggering SHA (for PR fallback, the PR head SHA), permissions are
 read-only, and no secrets are used.
 
-This delivery modifies only workflow files and this note, so the `push.paths`
-filter does **not** run either workflow on the staging push. PR #10 remains
-Draft, so any fallback job on its `synchronize` event is **skipped without
-running tests or CI**, and its skipped conclusion is not Guardian evidence.
+PR #10's original isolated Draft source did not cause a qualifying `push`
+run. In the combined PR #9/#10/#11 integration candidate, the broadened
+`push.paths` **will match** a push of the integration branch. A push is not
+authorized by this document, and can run real Tests and CI even while a PR
+remains Draft. A Draft `pull_request` fallback job is skipped, and its skipped
+conclusion is not Guardian evidence. Do not confuse that skipped fallback
+with the independent `push` run.
 There is no `workflow_dispatch` event. `main` currently lacks `test/`,
 `package.json`, and `package-lock.json`: later eligible events fail closed
 until test source **and** an independently reviewed nonempty `scripts.ci`
@@ -73,4 +79,5 @@ triggering, checkout SHA binding, check identity, and Guardian attestation;
    human reviews with stale-review dismissal and last-push approval. Confirm
    that `bypass_actors` is observably `[]` with sufficient permissions.
 5. Keep Feature OFF, Launch HOLD, Ruleset Disabled, no payments, no Merge,
-   no Deploy, and no tests during this staging task.
+   no Deploy. Authorized integration verification is a separate, explicit
+   gate; this document does not authorize a push or tests.

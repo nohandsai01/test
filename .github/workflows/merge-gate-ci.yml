@@ -8,6 +8,12 @@ on:
       - 'src/**'
       - 'test/**'
       - 'docs/**'
+      - 'merge-gate-install/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'nohands.yml'
+      - '.github/workflows/merge-gate-ci.yml'
+      - '.github/workflows/merge-gate-tests.yml'
   pull_request:
     types: [opened, reopened, synchronize, edited, ready_for_review]
     branches: [main]
