@@ -25,8 +25,8 @@ const jsonFiles = [
   'merge-gate-install/candidate/source-lock.json',
   'merge-gate-install/candidate/error-codes.json',
 ];
-// Node 24 contains several node:-only built-ins. Never manufacture a bare
-// alias for them: e.g. require('test') must not be accepted as node:test.
+// Node 24 contains node:-only built-ins. Never manufacture bare-name aliases
+// for them; the internal module prefix is part of their valid specifier.
 const builtins = new Set(builtinModules.flatMap((id) =>
   id.startsWith('node:') ? [id] : [id, `node:${id}`]));
 const jsFile = /\.(?:cjs|mjs|js)$/;
