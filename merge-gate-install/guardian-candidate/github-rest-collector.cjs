@@ -55,24 +55,61 @@ function getJson(path, installationToken) {
         reject(new CollectorError('GITHUB_CONTENT_TYPE_INVALID'));
         return;
       }
-      const declared = Number(response.headers['content-length']);
-      if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      // The response must be identity-encoded JSON. Never parse compressed
+      // bytes or accept ambiguous/invalid framing metadata as trusted data.
+      const encoding = response.headers['content-encoding'];
+      if (encoding !== undefined && encoding !== 'identity') {
+        response.resume();
+        reject(new CollectorError('GITHUB_CONTENT_ENCODING_INVALID'));
+        return;
+      }
+      const lengthHeader = response.headers['content-length'];
+      if (lengthHeader !== undefined &&
+          (typeof lengthHeader !== 'string' ||
+           !/^(0|[1-9][0-9]*)$/.test(lengthHeader) ||
+           !Number.isSafeInteger(Number(lengthHeader)))) {
+        response.resume();
+        reject(new CollectorError('GITHUB_CONTENT_LENGTH_INVALID'));
+        return;
+      }
+      const declared = lengthHeader === undefined ? null : Number(lengthHeader);
+      if (declared !== null && declared > MAX_RESPONSE_BYTES) {
         response.resume();
         reject(new CollectorError('GITHUB_RESPONSE_TOO_LARGE'));
         return;
       }
-      let size = 0;
+      let size = 0, ended = false;
       const chunks = [];
+      if (typeof response.setTimeout === 'function') {
+        response.setTimeout(10_000, () =>
+          response.destroy(new CollectorError('GITHUB_READ_TIMEOUT')));
+      }
       response.on('data', (chunk) => {
+        if (!Buffer.isBuffer(chunk)) {
+          response.destroy(new CollectorError('GITHUB_RESPONSE_INVALID_CHUNK'));
+          return;
+        }
         size += chunk.length;
-        if (size > MAX_RESPONSE_BYTES) {
+        if (size > MAX_RESPONSE_BYTES ||
+            (declared !== null && size > declared)) {
           response.destroy(new CollectorError('GITHUB_RESPONSE_TOO_LARGE'));
           return;
         }
         chunks.push(chunk);
       });
-      response.on('error', reject);
+      response.on('aborted', () =>
+        reject(new CollectorError('GITHUB_RESPONSE_INCOMPLETE')));
+      response.on('close', () => {
+        if (!ended) reject(new CollectorError('GITHUB_RESPONSE_INCOMPLETE'));
+      });
+      response.on('error', (error) => reject(error instanceof CollectorError ?
+        error : new CollectorError('GITHUB_TRANSPORT_FAILED')));
       response.on('end', () => {
+        ended = true;
+        if (declared !== null && size !== declared) {
+          reject(new CollectorError('GITHUB_RESPONSE_INCOMPLETE'));
+          return;
+        }
         try {
           const body = parseUniqueKeySourceLock(Buffer.concat(chunks));
           resolve({ body, link: response.headers.link || '' });
@@ -93,6 +130,13 @@ function normalizedPr(raw) {
     (raw.state === 'open' || raw.state === 'closed') && object(raw.base) &&
     object(raw.head) && object(raw.base.repo) && object(raw.head.repo) &&
     object(raw.user) && Number.isSafeInteger(raw.user.id) && raw.user.id > 0 &&
+    raw.user.type === 'User' && typeof raw.user.login === 'string' &&
+    raw.user.login.length > 0 &&
+    typeof raw.base.ref === 'string' && raw.base.ref === 'main' &&
+    typeof raw.base.sha === 'string' && SHA.test(raw.base.sha) &&
+    typeof raw.head.ref === 'string' && raw.head.ref.length > 0 &&
+    typeof raw.head.sha === 'string' && SHA.test(raw.head.sha) &&
+    raw.base.repo.full_name === REPO && raw.head.repo.full_name === REPO &&
     typeof raw.draft === 'boolean' &&
     Number.isSafeInteger(raw.changed_files) && raw.changed_files >= 0 &&
     raw.changed_files <= 3000 &&
@@ -107,13 +151,24 @@ function normalizedPr(raw) {
     changedFiles: raw.changed_files,
     commitCount: raw.commits,
     author: { id: raw.user.id, login: raw.user.login, type: raw.user.type },
-    base: { ref: raw.base.ref, repo: { full_name: raw.base.repo.full_name } },
-    head: { sha: raw.head.sha, repo: { full_name: raw.head.repo.full_name } },
+    base: { ref: raw.base.ref, sha: raw.base.sha,
+      repo: { full_name: raw.base.repo.full_name } },
+    head: { ref: raw.head.ref, sha: raw.head.sha,
+      repo: { full_name: raw.head.repo.full_name } },
   };
 }
 function normalizedCheck(raw) {
   guard(object(raw) && object(raw.app) && object(raw.check_suite) &&
-    Number.isSafeInteger(raw.check_suite.id) && raw.check_suite.id > 0,
+    Number.isSafeInteger(raw.id) && raw.id > 0 &&
+    Number.isSafeInteger(raw.app.id) && raw.app.id > 0 &&
+    Number.isSafeInteger(raw.check_suite.id) && raw.check_suite.id > 0 &&
+    typeof raw.name === 'string' && raw.name.length > 0 &&
+    raw.name.length <= 120 && !/[\x00-\x1f]/.test(raw.name) &&
+    typeof raw.head_sha === 'string' && SHA.test(raw.head_sha) &&
+    ['queued', 'in_progress', 'completed'].includes(raw.status) &&
+    (raw.status !== 'completed' ||
+      (typeof raw.completed_at === 'string' &&
+        Number.isFinite(Date.parse(raw.completed_at)))),
   'GITHUB_CHECK_RESPONSE_INVALID');
   return {
     id: raw.id, name: raw.name, head_sha: raw.head_sha,
@@ -195,6 +250,9 @@ async function collectAuthenticatedGithubSnapshot({ pullNumber, expectedHeadSha,
   const runsPath = PREFIX + '/commits/' + expectedHeadSha + '/check-runs?filter=all&per_page=25&page=';
   const first = await getJson(runsPath + '1', installationToken);
   const total = countResponse(first, 'check_runs', MAX_CHECKS);
+  // GitHub may truncate ref-based check enumeration at 1000. Exact boundary
+  // cannot prove an exhaustive list; never accept a capped collection.
+  guard(total < MAX_CHECKS, 'GITHUB_CHECK_ENUMERATION_AT_CAP');
   const pages = Math.max(1, Math.ceil(total / PER_PAGE));
   const runs = [];
   const ids = new Set(), observedPages = [];
@@ -227,9 +285,17 @@ async function collectAuthenticatedGithubSnapshot({ pullNumber, expectedHeadSha,
       repeat.link === original.link,
     'GITHUB_CHECKS_CHANGED_DURING_READ');
   }
+  // New check suites may appear without changing already-enumerated pages;
+  // an installation can also lose repository access mid-enumeration.
+  const finalSuites = await getJson(PREFIX + '/commits/' + expectedHeadSha +
+    '/check-suites?per_page=1&page=1', installationToken);
+  guard(JSON.stringify(finalSuites.body) === JSON.stringify(suites.body) &&
+    finalSuites.link === suites.link,
+  'GITHUB_SUITES_CHANGED_DURING_READ');
   const finalPr = normalizedPr((await getJson(prPath, installationToken)).body);
   guard(JSON.stringify(finalPr) === JSON.stringify(firstPr),
     'GITHUB_PR_CHANGED_DURING_READ');
+  await confirmInstallationScope(installationToken);
 
   return {
     repository: REPO,

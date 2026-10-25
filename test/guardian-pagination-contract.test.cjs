@@ -45,8 +45,8 @@ async function mockRead({ changeCheckPage2 = false, changeInstallPage2 = false }
       } else if (path === PREFIX + '/pulls/12') {
         body = { number: 12, state: 'open', draft: false, changed_files: 2,
           commits: 1, user: {id: 111, login: 'synthetic', type: 'User'},
-          base: {ref: 'main', repo: {full_name: REPO}},
-          head: {sha: SHA, repo: {full_name: REPO}} };
+          base: {ref: 'main', sha: 'b'.repeat(40), repo: {full_name: REPO}},
+          head: {ref: 'feature', sha: SHA, repo: {full_name: REPO}} };
       } else if (path === PREFIX + '/commits/' + SHA +
         '/check-suites?per_page=1&page=1') {
         body = { total_count: 1, check_suites: [{id: 44}] };
@@ -94,7 +94,7 @@ test('two-page installation scope and check-run inventory are fully re-read', as
   const scopePage2 = '/installation/repositories?per_page=25&page=2';
   const checksPage2 = PREFIX + '/commits/' + SHA +
     '/check-runs?filter=all&per_page=25&page=2';
-  assert.equal(calls.get(scopePage2), 2);
+  assert.equal(calls.get(scopePage2), 4); // initial + final scope validation
   assert.equal(calls.get(checksPage2), 2);
   assert.ok(visited.every(({method, host}) =>
     method === 'GET' && host === 'api.github.com'));

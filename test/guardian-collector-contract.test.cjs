@@ -13,10 +13,13 @@ const REPO = 'nohandsai01/test';
 const SHA = 'a'.repeat(40);
 
 async function collectWithSyntheticGithub({ changedFiles = 2, commits = 3,
-  changedFilesOnReread = changedFiles, commitsOnReread = commits } = {}) {
+  changedFilesOnReread = changedFiles, commitsOnReread = commits,
+  baseSha = 'b'.repeat(40), baseShaOnReread = baseSha,
+  changeSuitesOnReread = false, revokeInstallationAtEnd = false,
+  checkRunTotal = 0 } = {}) {
   const original = https.request;
   const visited = [];
-  let pullReads = 0;
+  let pullReads = 0, suiteReads = 0, scopeReads = 0;
   https.request = (request, onResponse) => {
     const req = new EventEmitter();
     req.end = () => queueMicrotask(() => {
@@ -24,7 +27,11 @@ async function collectWithSyntheticGithub({ changedFiles = 2, commits = 3,
       visited.push({ endpoint, method: request.method, host: request.hostname });
       let payload;
       if (endpoint === '/installation/repositories?per_page=25&page=1') {
-        payload = { total_count: 1, repositories: [{ full_name: REPO }] };
+        scopeReads++;
+        const revoked = revokeInstallationAtEnd && scopeReads >= 3;
+        payload = { total_count: 1, repositories: [
+          { full_name: revoked ? 'other/repo' : REPO },
+        ] };
       } else if (endpoint === '/repos/nohandsai01/test/pulls/12') {
         const repeat = pullReads++ > 0;
         payload = {
@@ -32,15 +39,20 @@ async function collectWithSyntheticGithub({ changedFiles = 2, commits = 3,
           changed_files: repeat ? changedFilesOnReread : changedFiles,
           commits: repeat ? commitsOnReread : commits,
           user: { id: 111, login: 'synthetic', type: 'User' },
-          base: { ref: 'main', repo: { full_name: REPO } },
-          head: { sha: SHA, repo: { full_name: REPO } },
+          base: { ref: 'main',
+            sha: repeat ? baseShaOnReread : baseSha,
+            repo: { full_name: REPO } },
+          head: { ref: 'feature', sha: SHA, repo: { full_name: REPO } },
         };
       } else if (endpoint === '/repos/nohandsai01/test/commits/' +
         SHA + '/check-suites?per_page=1&page=1') {
-        payload = { total_count: 0, check_suites: [] };
+        suiteReads++;
+        const suiteChanged = changeSuitesOnReread && suiteReads === 2;
+        payload = { total_count: suiteChanged ? 1 : 0,
+          check_suites: suiteChanged ? [{ id: 999 }] : [] };
       } else if (endpoint === '/repos/nohandsai01/test/commits/' +
         SHA + '/check-runs?filter=all&per_page=25&page=1') {
-        payload = { total_count: 0, check_runs: [] };
+        payload = { total_count: checkRunTotal, check_runs: [] };
       } else {
         req.emit('error', new Error('unexpected endpoint'));
         return;
@@ -72,6 +84,8 @@ test('collector binds PR independent file and commit totals to snapshot', async 
   assert.equal(snapshot.pullRequest.changedFiles, 2);
   assert.equal(snapshot.pullRequest.commitCount, 3);
   assert.equal(snapshot.pullRequest.head.sha, SHA);
+  assert.equal(snapshot.pullRequest.base.sha, 'b'.repeat(40));
+  assert.equal(snapshot.pullRequest.head.ref, 'feature');
   assert.equal(snapshot.checkRuns.total_count, 0);
   assert.equal(visited.filter((v) =>
     v.endpoint === '/repos/nohandsai01/test/pulls/12').length, 2);
@@ -95,4 +109,28 @@ test('collector refuses count drift between authenticated PR reads', async () =>
     { code: 'GITHUB_PR_CHANGED_DURING_READ' });
   await assert.rejects(collectWithSyntheticGithub({ commitsOnReread: 4 }),
     { code: 'GITHUB_PR_CHANGED_DURING_READ' });
+  await assert.rejects(collectWithSyntheticGithub({
+    baseShaOnReread: 'c'.repeat(40),
+  }), { code: 'GITHUB_PR_CHANGED_DURING_READ' });
+});
+
+test('collector rejects missing or malformed base SHA from authenticated PR', async () => {
+  for (const badBase of [null, 'not-a-sha', 'A'.repeat(40), '']) {
+    await assert.rejects(collectWithSyntheticGithub({ baseSha: badBase }),
+      { code: 'GITHUB_PR_RESPONSE_INVALID' });
+  }
+});
+
+test('collector refuses new suites or revoked installation scope during read', async () => {
+  await assert.rejects(collectWithSyntheticGithub({
+    changeSuitesOnReread: true,
+  }), { code: 'GITHUB_SUITES_CHANGED_DURING_READ' });
+  await assert.rejects(collectWithSyntheticGithub({
+    revokeInstallationAtEnd: true,
+  }), { code: 'GITHUB_APP_INSTALLATION_SCOPE_MISMATCH' });
+});
+
+test('1000-ref Check cap never constitutes complete evidence', async () => {
+  await assert.rejects(collectWithSyntheticGithub({ checkRunTotal: 1000 }),
+    { code: 'GITHUB_CHECK_ENUMERATION_AT_CAP' });
 });
