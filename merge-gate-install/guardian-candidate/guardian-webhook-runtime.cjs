@@ -325,6 +325,7 @@ async function processVerifiedGuardianTarget(parsed, host) {
   }
   try {
     const receipt = await postFailureOnlyCheck({ token: installationToken.token,
+      appId: host.guardianAppId,
       headSha: parsed.headSha,
       summary: 'Source-only Guardian candidate: ' + reason +
         '. Independent release authority and Founder activation are not established.',

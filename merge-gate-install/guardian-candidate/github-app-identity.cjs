@@ -7,6 +7,7 @@
 
 const https = require('node:https');
 const crypto = require('node:crypto');
+const { parseUniqueKeySourceLock } = require('../candidate/verify-source-lock.cjs');
 
 const API_HOST = 'api.github.com';
 const MAX_RESPONSE_BYTES = 128_000;
@@ -39,9 +40,13 @@ function githubJson(method, path, authorization, body) {
   assert(typeof authorization === 'string' && authorization.length > 8 &&
     authorization.length < 5000 && /^[\x21-\x7e]+$/.test(authorization),
   'GUARDIAN_AUTHORIZATION_UNAVAILABLE');
-  const payload = body === undefined ? undefined : JSON.stringify(body);
-  assert(payload === undefined || Buffer.byteLength(payload) <= 16_384,
-    'GUARDIAN_REQUEST_TOO_LARGE');
+  let payload;
+  try {
+    payload = body === undefined ? undefined : JSON.stringify(body);
+  } catch (_) { throw new GuardianApiError('GUARDIAN_REQUEST_INVALID'); }
+  assert(payload === undefined || (typeof payload === 'string' &&
+    Buffer.byteLength(payload) <= 16_384),
+  'GUARDIAN_REQUEST_TOO_LARGE');
   return new Promise((resolve, reject) => {
     const request = https.request({
       hostname: API_HOST, port: 443, protocol: 'https:', method, path,
@@ -57,30 +62,77 @@ function githubJson(method, path, authorization, body) {
       },
       agent: new https.Agent({ keepAlive: false, maxSockets: 1 }),
     }, (response) => {
-      if (![200, 201].includes(response.statusCode)) {
+      // Read-only endpoints must return 200; POST creation must return 201.
+      // Do not confuse a proxy's generic 200 with a GitHub creation receipt.
+      if (response.statusCode !== (method === 'GET' ? 200 : 201)) {
         response.resume(); reject(new GuardianApiError('GUARDIAN_GITHUB_API_REJECTED')); return;
       }
       if (!/^application\/(?:json|vnd\.github\+json)(?:;|$)/i.test(
         String(response.headers['content-type'] || ''))) {
         response.resume(); reject(new GuardianApiError('GUARDIAN_GITHUB_CONTENT_TYPE')); return;
       }
-      let bytes = 0;
+      const encoding = response.headers['content-encoding'];
+      if (encoding !== undefined && encoding !== 'identity') {
+        response.resume();
+        reject(new GuardianApiError('GUARDIAN_GITHUB_ENCODING_INVALID'));
+        return;
+      }
+      const rawLength = response.headers['content-length'];
+      if (rawLength !== undefined &&
+          (typeof rawLength !== 'string' ||
+           !/^(0|[1-9][0-9]*)$/.test(rawLength) ||
+           !Number.isSafeInteger(Number(rawLength)))) {
+        response.resume();
+        reject(new GuardianApiError('GUARDIAN_GITHUB_LENGTH_INVALID'));
+        return;
+      }
+      const declared = rawLength === undefined ? null : Number(rawLength);
+      if (declared !== null && declared > MAX_RESPONSE_BYTES) {
+        response.resume();
+        reject(new GuardianApiError('GUARDIAN_GITHUB_RESPONSE_OVERSIZE'));
+        return;
+      }
+      let bytes = 0, ended = false;
       const chunks = [];
+      if (typeof response.setTimeout === 'function') {
+        response.setTimeout(10_000, () =>
+          response.destroy(new GuardianApiError('GUARDIAN_GITHUB_TIMEOUT')));
+      }
       response.on('data', (chunk) => {
+        if (!Buffer.isBuffer(chunk)) {
+          response.destroy(new GuardianApiError('GUARDIAN_GITHUB_CHUNK_INVALID'));
+          return;
+        }
         bytes += chunk.length;
-        if (bytes > MAX_RESPONSE_BYTES) {
+        if (bytes > MAX_RESPONSE_BYTES ||
+            (declared !== null && bytes > declared)) {
           response.destroy(new GuardianApiError('GUARDIAN_GITHUB_RESPONSE_OVERSIZE'));
           return;
         }
         chunks.push(chunk);
       });
-      response.on('error', reject);
+      response.on('error', (error) => reject(error instanceof GuardianApiError ?
+        error : new GuardianApiError('GUARDIAN_GITHUB_TRANSPORT')));
+      response.on('aborted', () =>
+        reject(new GuardianApiError('GUARDIAN_GITHUB_RESPONSE_INCOMPLETE')));
+      response.on('close', () => {
+        if (!ended) reject(new GuardianApiError('GUARDIAN_GITHUB_RESPONSE_INCOMPLETE'));
+      });
       response.on('end', () => {
+        ended = true;
+        if (declared !== null && bytes !== declared) {
+          reject(new GuardianApiError('GUARDIAN_GITHUB_RESPONSE_INCOMPLETE'));
+          return;
+        }
         try {
-          const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          // Reject duplicate JSON keys and malformed UTF-8, including nested
+          // permissions, repository IDs, and publisher identities.
+          const result = parseUniqueKeySourceLock(Buffer.concat(chunks));
           assert(isRecord(result), 'GUARDIAN_GITHUB_JSON_INVALID');
           resolve(result);
-        } catch (_) { reject(new GuardianApiError('GUARDIAN_GITHUB_JSON_INVALID')); }
+        } catch (_) {
+          reject(new GuardianApiError('GUARDIAN_GITHUB_JSON_INVALID'));
+        }
       });
     });
     request.on('timeout', () => request.destroy(new GuardianApiError('GUARDIAN_GITHUB_TIMEOUT')));
@@ -172,16 +224,25 @@ async function mintScopedInstallationToken({ appId, installationId, privateKeyPe
   // Explicit repository and least-privilege permission intersection.
   const response = await githubJson('POST', '/app/installations/' + installationId +
     '/access_tokens', jwt, {
-    repositories: ['test'],
+    repository_ids: [expectedRepositoryId],
     permissions: { checks: 'write', pull_requests: 'read',
       ...(requireActionsRead === true ? { actions: 'read' } : {}) },
   });
+  const allowedPermissions = new Set(['checks', 'pull_requests',
+    'metadata', ...(requireActionsRead === true ? ['actions'] : [])]);
   assert(typeof response.token === 'string' && response.token.length >= 16 &&
+    response.token.length <= 4096 && /^[\x21-\x7e]+$/.test(response.token) &&
     typeof response.expires_at === 'string' &&
+    Number.isFinite(Date.parse(response.expires_at)) &&
     Date.parse(response.expires_at) > Date.now() + 60_000 &&
+    Date.parse(response.expires_at) <= Date.now() + 3_600_000 + 60_000 &&
     isRecord(response.permissions) && response.permissions.checks === 'write' &&
     response.permissions.pull_requests === 'read' &&
+    (response.permissions.metadata === undefined ||
+      response.permissions.metadata === 'read') &&
     (requireActionsRead !== true || response.permissions.actions === 'read') &&
+    Object.keys(response.permissions).every((key) =>
+      allowedPermissions.has(key)) &&
     Array.isArray(response.repositories) && response.repositories.length === 1 &&
     isRecord(response.repositories[0]) &&
     response.repositories[0].full_name === 'nohandsai01/test' &&
@@ -245,8 +306,9 @@ async function revalidateCurrentInstallationScope({ appId, installationId,
 }
 
 /** Deliberately no generic check writer or success conclusion is exposed. */
-async function postFailureOnlyCheck({ token, headSha, summary }) {
-  assert(typeof headSha === 'string' && SHA.test(headSha) &&
+async function postFailureOnlyCheck({ token, headSha, summary, appId }) {
+  assert(Number.isSafeInteger(appId) && appId > 0 &&
+    typeof headSha === 'string' && SHA.test(headSha) &&
     typeof summary === 'string' && summary.length <= 3000 &&
     summary.length > 0 && /^[\x20-\x7e\n]+$/.test(summary),
   'GUARDIAN_FAILURE_CHECK_INVALID');
@@ -257,7 +319,9 @@ async function postFailureOnlyCheck({ token, headSha, summary }) {
   });
   assert(Number.isSafeInteger(result.id) && result.id > 0 &&
     result.name === 'NO HANDS Merge Gate Required Check' &&
-    result.head_sha === headSha && result.conclusion === 'failure',
+    result.head_sha === headSha && result.status === 'completed' &&
+    result.conclusion === 'failure' &&
+    isRecord(result.app) && result.app.id === appId,
   'GUARDIAN_FAILURE_CHECK_RECEIPT_INVALID');
   return { checkRunId: result.id, headSha, conclusion: 'failure' };
 }
@@ -283,7 +347,8 @@ async function postConclusiveSuccessCheck({ token, headSha, summary, appId,
   });
   assert(Number.isSafeInteger(result.id) && result.id > 0 &&
     result.name === 'NO HANDS Merge Gate Required Check' &&
-    result.head_sha === headSha && result.conclusion === 'success' &&
+    result.head_sha === headSha && result.status === 'completed' &&
+    result.conclusion === 'success' &&
     isRecord(result.app) && result.app.id === appId,
   'GUARDIAN_SUCCESS_CHECK_RECEIPT_INVALID');
   return { checkRunId: result.id, headSha, conclusion: 'success' };
