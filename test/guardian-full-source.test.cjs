@@ -284,10 +284,49 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
       previous_filename: 'src/legacy.cjs', status: 'renamed' }];
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
-    files = [{ filename: 'src/moved.cjs',
-      previous_filename: 'src/legacy.cjs', status: 'renamed' }];
-    const validRename = await collectGuardianConclusiveProvenance(base);
-    assert.equal(validRename.changedFileCount, 1);
+    // Copied files need the same source check. Missing, protected, or
+    // malformed origins must fail closed even with a safe destination.
+    for (const operation of ['renamed', 'copied']) {
+      for (const oldPath of [
+        '.github/workflows/protected.yml', 'src/../protected.yml',
+        'docs/./nested.md', 'test//fixture.cjs',
+        'src/legacy.cjs/..', 'src/legacy.cjs',
+      ]) {
+        const dest = oldPath === 'src/legacy.cjs' ?
+          'src/legacy.cjs' : 'src/moved.cjs';
+        files = [{ filename: dest, previous_filename: oldPath,
+          status: operation }];
+        await assert.rejects(collectGuardianConclusiveProvenance(base),
+          { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
+      }
+      files = [{ filename: 'src/moved.cjs', status: operation }];
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
+      files = [{ filename: 'src/moved.cjs', previous_filename: null,
+        status: operation }];
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
+      files = [{ filename: 'src/moved.cjs', previous_filename: 'src/legacy.cjs',
+        status: operation }];
+      const validMove = await collectGuardianConclusiveProvenance(base);
+      assert.equal(validMove.changedFileCount, 1);
+    }
+    // A change with a conflicting rename/copy origin cannot be reclassified
+    // as an ordinary add or edit to bypass source provenance validation.
+    for (const operation of ['added', 'modified', 'removed', 'changed']) {
+      files = [{ filename: 'src/moved.cjs', status: operation,
+        previous_filename: '.github/workflows/protected.yml' }];
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
+      files = [{ filename: 'src/moved.cjs', status: operation }];
+      const validOrdinary = await collectGuardianConclusiveProvenance(base);
+      assert.equal(validOrdinary.changedFileCount, 1);
+    }
+    files = [{ filename: 'src/duplicate.cjs', status: 'modified' },
+      { filename: 'src/duplicate.cjs', status: 'renamed',
+        previous_filename: 'src/legacy.cjs' }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PR_FILE_RESPONSE_INVALID' });
   } finally {
     collector.readGuardianGithubJson = prior;
     delete require.cache[provenancePath];

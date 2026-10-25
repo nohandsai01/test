@@ -196,10 +196,16 @@ function validateTouchedFiles(files) {
       ['added', 'modified', 'removed', 'renamed', 'copied', 'changed'].includes(file.status),
     'GUARDIAN_PR_FILE_RESPONSE_INVALID');
     seen.add(file.filename);
-    // Workflow source must not be supplied or changed by the PR author.
-    // A renamed source is a two-path change: validate its old and new names.
+    // Both rename and copy report an old source path. A protected source
+    // cannot be smuggled into an allowed destination through either status.
+    // Reject unexpected origin metadata on other statuses as ambiguous.
+    const hasOrigin = Object.hasOwn(file, 'previous_filename');
+    const needsOrigin = file.status === 'renamed' || file.status === 'copied';
     requireProof(candidateScopedPath(file.filename) &&
-      (file.status !== 'renamed' || candidateScopedPath(file.previous_filename)),
+      (needsOrigin ?
+        (hasOrigin && candidateScopedPath(file.previous_filename) &&
+         file.previous_filename !== file.filename) :
+        !hasOrigin),
     'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE');
   }
 }
