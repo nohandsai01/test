@@ -77,6 +77,15 @@ test('authenticated review and workflow completion event targets remain exact-he
   };
   assert.equal(check('pull_request_review', {
     ...target, action: 'submitted', pull_request: pr,
+    review: { state: 'approved', commit_id: SHA },
+  }).ok, true);
+  assert.equal(check('pull_request_review', {
+    ...target, action: 'submitted', pull_request: pr,
+    review: { state: 'approved', commit_id: 'b'.repeat(40) },
+  }).reason, 'WEBHOOK_REVIEW_EXACT_HEAD_UNVERIFIED');
+  assert.equal(check('pull_request_review', {
+    ...target, action: 'dismissed', pull_request: pr,
+    review: { state: 'dismissed', commit_id: SHA },
   }).ok, true);
   assert.equal(check('workflow_run', {
     ...target, action: 'completed', workflow_run: {
