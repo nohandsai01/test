@@ -133,6 +133,8 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
   const collector = require(collectorPath);
   const prior = collector.readGuardianGithubJson;
   let files = [{ filename: 'src/a.cjs', status: 'modified' }];
+  let driftFirstFilePage = false;
+  let firstFilePageReads = 0;
   let rulesAppId = 999;
   let rulesetBypassActors = [];
   let rulesetIdentity = 'valid';
@@ -151,7 +153,21 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
       body: [{ id: 60, user: { id: 222, type: 'User' }, state: 'APPROVED',
         submitted_at: '2026-10-23T12:00:00Z', commit_id: SHA }], link: '',
     };
-    if (path.includes('/pulls/12/files')) return { body: files, link: '' };
+    if (path.includes('/pulls/12/files')) {
+      const page = Number(new URL(path, 'https://api.github.com').searchParams.get('page'));
+      const start = (page - 1) * 25;
+      let rows = files.slice(start, start + 25);
+      if (page === 1 && driftFirstFilePage && ++firstFilePageReads === 2) {
+        rows = rows.map((item, index) => index === 0 ?
+          { ...item, filename: 'src/changed-during-read.cjs' } : item);
+      }
+      return {
+        body: rows,
+        link: start + 25 < files.length ?
+          '<https://api.github.com/repos/nohandsai01/test/pulls/12/files?page=' +
+            (page + 1) + '>; rel="next"' : '',
+      };
+    }
     if (path.includes('/rules/branches/main')) return {
       body: [
         { type: 'required_status_checks', ruleset_id: rulesetIdentity === 'missing' ? undefined : 101,
@@ -216,6 +232,7 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
       { type: 'ci', checkName: 'ci-run', issuerAppId: 778 },
     ],
     snapshot: { pullRequest: { number: 12, state: 'open', draft: false,
+      changedFiles: 1, commitCount: 1,
       author: { id: 111, type: 'User' }, head: { sha: SHA } },
     checkRuns: { check_runs: [
       { id: 501, name: 'tests-run', app: { id: 777 }, check_suite: { id: 44 },
@@ -325,8 +342,67 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     files = [{ filename: 'src/duplicate.cjs', status: 'modified' },
       { filename: 'src/duplicate.cjs', status: 'renamed',
         previous_filename: 'src/legacy.cjs' }];
+    base.snapshot.pullRequest.changedFiles = 2;
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_PR_FILE_RESPONSE_INVALID' });
+    files = [{ filename: 'src/first.cjs', status: 'renamed',
+      previous_filename: 'src/original.cjs' },
+      { filename: 'src/second.cjs', status: 'renamed',
+        previous_filename: 'src/original.cjs' }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PR_DUPLICATE_RENAME_ORIGIN' });
+    // GitHub can legitimately report multiple copies of the same source.
+    files[0].status = 'copied';
+    files[1].status = 'copied';
+    assert.equal((await collectGuardianConclusiveProvenance(base)).changedFileCount, 2);
+    // PR-level file count is independent from the array returned by GitHub
+    // pagination. Missing, excess, or out-of-cap counts all HOLD.
+    files = [{ filename: 'src/a.cjs', status: 'modified' }];
+    base.snapshot.pullRequest.changedFiles = 2;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PR_CHANGED_FILE_COUNT_MISMATCH' });
+    files = [{ filename: 'src/a.cjs', status: 'modified' },
+      { filename: 'src/b.cjs', status: 'modified' }];
+    base.snapshot.pullRequest.changedFiles = 1;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PR_CHANGED_FILE_COUNT_MISMATCH' });
+    for (const badCount of [undefined, null, -1, 0, 301, '1', 1.5]) {
+      base.snapshot.pullRequest.changedFiles = badCount;
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_PR_CHANGED_FILE_COUNT_UNVERIFIED' });
+    }
+    base.snapshot.pullRequest.changedFiles = 2;
+    const complete = await collectGuardianConclusiveProvenance(base);
+    assert.equal(complete.changedFileCount, 2);
+    // PR commit counts are read independently of the commit-page list.
+    // An omitted contributor at the pagination cap must not be ignored.
+    for (const badCount of [undefined, null, 0, -1, 251, '1', 1.1]) {
+      base.snapshot.pullRequest.commitCount = badCount;
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_PR_COMMIT_COUNT_UNVERIFIED' });
+    }
+    base.snapshot.pullRequest.commitCount = 2;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PR_COMMIT_COUNT_MISMATCH' });
+    base.snapshot.pullRequest.commitCount = 1;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).changedFileCount, 2);
+    // Two GitHub pages are accepted only when every row and the independent
+    // PR-level changed_files count agree.
+    files = Array.from({ length: 26 }, (_, index) => ({
+      filename: 'src/safe-' + index + '.cjs', status: 'modified',
+    }));
+    base.snapshot.pullRequest.changedFiles = 26;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).changedFileCount, 26);
+    // Same count and pagination structure but a modified first page must
+    // reject, rather than mix old/new rows into one false positive proof.
+    driftFirstFilePage = true;
+    firstFilePageReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PROVENANCE_PAGE_CHANGED' });
+    driftFirstFilePage = false;
+    files = [{ filename: 'src/a.cjs', status: 'modified' }];
+    base.snapshot.pullRequest.changedFiles = 1;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).changedFileCount, 1);
   } finally {
     collector.readGuardianGithubJson = prior;
     delete require.cache[provenancePath];

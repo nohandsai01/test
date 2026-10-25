@@ -93,12 +93,19 @@ function normalizedPr(raw) {
     (raw.state === 'open' || raw.state === 'closed') && object(raw.base) &&
     object(raw.head) && object(raw.base.repo) && object(raw.head.repo) &&
     object(raw.user) && Number.isSafeInteger(raw.user.id) && raw.user.id > 0 &&
-    typeof raw.draft === 'boolean',
+    typeof raw.draft === 'boolean' &&
+    Number.isSafeInteger(raw.changed_files) && raw.changed_files >= 0 &&
+    raw.changed_files <= 3000 &&
+    Number.isSafeInteger(raw.commits) && raw.commits >= 1,
   'GITHUB_PR_RESPONSE_INVALID');
   return {
     number: raw.number,
     state: raw.state,
     draft: raw.draft,
+    // A bounded count from GitHub's PR endpoint is independent of the
+    // paginated files endpoint and guards against omitted protected files.
+    changedFiles: raw.changed_files,
+    commitCount: raw.commits,
     author: { id: raw.user.id, login: raw.user.login, type: raw.user.type },
     base: { ref: raw.base.ref, repo: { full_name: raw.base.repo.full_name } },
     head: { sha: raw.head.sha, repo: { full_name: raw.head.repo.full_name } },

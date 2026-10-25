@@ -31,17 +31,34 @@ function nextPage(link) {
 
 async function pagesArray(path, token, limit) {
   const rows = [];
+  const firstPath = path + (path.includes('?') ? '&' : '?') + 'per_page=25&page=1';
+  let firstPage, firstLink;
   for (let page = 1; page <= Math.ceil(limit / 25) + 1; page++) {
-    const response = await readGuardianGithubJson(path +
-      (path.includes('?') ? '&' : '?') + 'per_page=25&page=' + page, token);
+    const currentPath = path + (path.includes('?') ? '&' : '?') +
+      'per_page=25&page=' + page;
+    const response = await readGuardianGithubJson(currentPath, token);
     requireProof(Array.isArray(response.body) && response.body.length <= 25,
       'GUARDIAN_PROVENANCE_PAGE_INVALID');
+    if (page === 1) {
+      firstPage = JSON.stringify(response.body);
+      firstLink = response.link;
+    }
     rows.push(...response.body);
     requireProof(rows.length <= limit, 'GUARDIAN_PROVENANCE_PAGE_LIMIT');
     const more = nextPage(response.link);
     requireProof(!more || response.body.length === 25,
       'GUARDIAN_PROVENANCE_PAGINATION_INCOMPLETE');
-    if (!more) return rows;
+    if (!more) {
+      // A PR file/review/commit list may change between GitHub pages, even
+      // while its total stays constant. Re-read the first page and fail
+      // closed on drift; this is still not a transactional GitHub snapshot.
+      const reread = await readGuardianGithubJson(firstPath, token);
+      requireProof(Array.isArray(reread.body) &&
+        JSON.stringify(reread.body) === firstPage &&
+        reread.link === firstLink,
+      'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+      return rows;
+    }
   }
   throw new GuardianProvenanceError('GUARDIAN_PROVENANCE_PAGINATION_LIMIT');
 }
@@ -188,8 +205,9 @@ function candidateScopedPath(filename) {
 }
 
 function validateTouchedFiles(files) {
+  requireProof(Array.isArray(files), 'GUARDIAN_PR_FILE_RESPONSE_INVALID');
   requireProof(files.length > 0, 'GUARDIAN_PR_NO_CHANGED_FILES');
-  const seen = new Set();
+  const seen = new Set(), renamedOrigins = new Set();
   for (const file of files) {
     requireProof(object(file) && typeof file.filename === 'string' &&
       file.filename.length < 500 && !seen.has(file.filename) &&
@@ -207,6 +225,13 @@ function validateTouchedFiles(files) {
          file.previous_filename !== file.filename) :
         !hasOrigin),
     'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE');
+    // Two distinct rename destinations cannot both claim the same source.
+    // Copies may share a source, but cannot skip or disguise that source.
+    if (file.status === 'renamed') {
+      requireProof(!renamedOrigins.has(file.previous_filename),
+        'GUARDIAN_PR_DUPLICATE_RENAME_ORIGIN');
+      renamedOrigins.add(file.previous_filename);
+    }
   }
 }
 
@@ -252,6 +277,14 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     pr.draft === false && pr.head?.sha === headSha &&
     positive(pr.author?.id) && pr.author.type === 'User',
   'GUARDIAN_PR_NOT_REVIEWABLE_AT_HEAD');
+  // GitHub exposes an independent PR-level changed_files count. A partial
+  // files page (even one hiding protected source) must never be promoted.
+  requireProof(positive(pr.changedFiles) && pr.changedFiles <= 300,
+    'GUARDIAN_PR_CHANGED_FILE_COUNT_UNVERIFIED');
+  // The PR commits endpoint truncates at 250; do not approve a partial
+  // contributor history and accidentally treat the reviewer as independent.
+  requireProof(positive(pr.commitCount) && pr.commitCount <= 250,
+    'GUARDIAN_PR_COMMIT_COUNT_UNVERIFIED');
 
   const [commits, reviews, files, rules] = await Promise.all([
     pagesArray(PREFIX + '/pulls/' + pullNumber + '/commits', installationToken, 250),
@@ -260,6 +293,8 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     readGuardianGithubJson(PREFIX + '/rules/branches/main', installationToken),
   ]);
   requireProof(!nextPage(rules.link), 'GUARDIAN_BRANCH_RULES_PAGINATION_UNKNOWN');
+  requireProof(commits.length === pr.commitCount,
+    'GUARDIAN_PR_COMMIT_COUNT_MISMATCH');
   requireProof(commits.length > 0 &&
     commits.every((commit) => object(commit) && SHA.test(commit.sha)) &&
     new Set(commits.map((commit) => commit.sha)).size === commits.length &&
@@ -269,6 +304,8 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     [commit.author?.id, commit.committer?.id].filter(positive)));
   requireProof(releasePolicy.reviewerIds.every((id) => !contributors.has(id)),
     'GUARDIAN_REVIEWER_IS_COMMIT_CONTRIBUTOR');
+  requireProof(files.length === pr.changedFiles,
+    'GUARDIAN_PR_CHANGED_FILE_COUNT_MISMATCH');
   validateTouchedFiles(files);
   branchRulesEvidence(rules.body, guardianAppId, releasePolicy.minApprovals,
     expectedEvidence);
