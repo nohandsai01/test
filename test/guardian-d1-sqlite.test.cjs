@@ -409,3 +409,105 @@ test('verified installation binding is immutable across D1 connections', async (
     });
   });
 });
+
+
+test('read-only D1 reconciliation lookup returns exact immutable tombstone across connections', async () => {
+  await fixture(async ({ first, second, firstDb }) => {
+    assert.equal(await first.conclusionStore.getReservation({
+      repositoryId: 88, pullNumber: 12, headSha: SHA,
+    }), null);
+    assert.equal(await first.conclusionStore.reserveOnce(CLAIM), true);
+    const row = await second.conclusionStore.getReservation({
+      repositoryId: 88, pullNumber: 12, headSha: SHA,
+    });
+    assert.equal(row.repositoryId, 88);
+    assert.equal(row.pullNumber, 12);
+    assert.equal(row.headSha, SHA);
+    assert.match(row.deliveryHash, /^[a-f0-9]{64}$/);
+    assert.match(row.createdAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    assert.ok(Object.isFrozen(row));
+    assert.equal(await second.conclusionStore.getReservation({
+      repositoryId: 88, pullNumber: 12, headSha: 'c'.repeat(40),
+    }), null);
+    assert.equal(firstDb.prepare(
+      'SELECT COUNT(*) AS n FROM guardian_conclusion_reservations').get().n, 1);
+  });
+});
+
+test('D1 reconciliation refuses malformed row or uncertain read after SQL reservation', async () => {
+  const values = [
+    { repository_id: 88, pull_number: 12, head_sha: SHA,
+      delivery_hash: 'BAD', created_at: '2026-10-26T01:00:00.000Z' },
+    { repository_id: 88, pull_number: 12, head_sha: 'b'.repeat(40),
+      delivery_hash: 'c'.repeat(64), created_at: '2026-10-26T01:00:00.000Z' },
+    { repository_id: 88, pull_number: 12, head_sha: SHA,
+      delivery_hash: 'c'.repeat(64), created_at: 'bad-time' },
+  ];
+  for (const value of values) {
+    const fake = createGuardianD1Stores({
+      prepare: () => ({ bind: () => ({
+        first: async () => value,
+      }) }),
+    });
+    await assert.rejects(fake.conclusionStore.getReservation({
+      repositoryId: 88, pullNumber: 12, headSha: SHA,
+    }), { code: 'GUARDIAN_CONCLUSION_LOOKUP_ROW_INVALID' });
+  }
+  const unstable = createGuardianD1Stores({
+    prepare: () => ({ bind: () => ({
+      first: async () => { throw new Error('synthetic D1 timeout'); },
+    }) }),
+  });
+  await assert.rejects(unstable.conclusionStore.getReservation({
+    repositoryId: 88, pullNumber: 12, headSha: SHA,
+  }), { code: 'GUARDIAN_D1_READ_FAILED' });
+  await assert.rejects(unstable.conclusionStore.getReservation({
+    repositoryId: -1, pullNumber: 12, headSha: SHA,
+  }), { code: 'GUARDIAN_CONCLUSION_LOOKUP_INVALID' });
+});
+
+test('operator reconciliation consumes real persisted D1 reservation but makes no writes', async () => {
+  await fixture(async ({ first, second, firstDb }) => {
+    assert.equal(await first.conclusionStore.reserveOnce(CLAIM), true);
+    const collectorPath = require.resolve(
+      '../merge-gate-install/guardian-candidate/github-rest-collector.cjs');
+    const modulePath = require.resolve(
+      '../merge-gate-install/guardian-candidate/guardian-conclusion-reconcile.cjs');
+    const collector = require(collectorPath);
+    const previous = collector.collectAuthenticatedGithubSnapshot;
+    const checkName = 'NO HANDS Merge Gate Required Check';
+    collector.collectAuthenticatedGithubSnapshot = async () => ({
+      repository: 'nohandsai01/test',
+      pullRequest: { number: 12,
+        base: { ref: 'main', repo: { full_name: 'nohandsai01/test' } },
+        head: { sha: SHA, repo: { full_name: 'nohandsai01/test' } },
+      },
+      checkRuns: { total_count: 1, check_runs: [{
+        id: 700, name: checkName, head_sha: SHA,
+        app: { id: 999 }, status: 'completed', conclusion: 'failure',
+        completed_at: new Date(Date.now() + 60_000).toISOString(),
+      }] },
+    });
+    delete require.cache[modulePath];
+    try {
+      const { reconcileGuardianConclusion } = require(modulePath);
+      const result = await reconcileGuardianConclusion({
+        repositoryId: 88, pullNumber: 12, headSha: SHA,
+        expectedAppId: 999, installationToken: 'synthetic-readonly-long-token',
+        conclusionStore: second.conclusionStore,
+      });
+      assert.equal(result.reason, 'RECONCILIATION_CHECK_OBSERVED_ONLY');
+      assert.equal(result.authoritativeRequiredCheck, 'NOT_ISSUED');
+      assert.equal(result.automaticRetryAllowed, false);
+      assert.equal(result.trusted, false);
+      assert.equal(firstDb.prepare(
+        'SELECT COUNT(*) AS n FROM guardian_conclusion_reservations').get().n, 1);
+      assert.equal(await second.conclusionStore.reserveOnce({
+        ...CLAIM, deliveryId: ALT_DELIVERY,
+      }), false);
+    } finally {
+      collector.collectAuthenticatedGithubSnapshot = previous;
+      delete require.cache[modulePath];
+    }
+  });
+});

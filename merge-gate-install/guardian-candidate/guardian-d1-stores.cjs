@@ -221,6 +221,27 @@ function createGuardianD1Stores(db) {
         'GUARDIAN_CONCLUSION_RESERVATION_READBACK_INVALID');
         return true;
       },
+      async getReservation({ repositoryId, pullNumber, headSha }) {
+        assert(positiveInteger(repositoryId) && positiveInteger(pullNumber) &&
+          SHA.test(headSha), 'GUARDIAN_CONCLUSION_LOOKUP_INVALID');
+        // Operator-facing read only. The reservation can never be deleted,
+        // reset, or reused to grant another Check publication attempt.
+        const row = await first(db,
+          'SELECT repository_id, pull_number, head_sha, delivery_hash, created_at ' +
+          'FROM guardian_conclusion_reservations WHERE repository_id = ? ' +
+          'AND pull_number = ? AND head_sha = ?',
+          [repositoryId, pullNumber, headSha]);
+        if (row === null) return null;
+        assert(row.repository_id === repositoryId &&
+          row.pull_number === pullNumber && row.head_sha === headSha &&
+          typeof row.delivery_hash === 'string' && HASH.test(row.delivery_hash) &&
+          isoUtc(row.created_at),
+        'GUARDIAN_CONCLUSION_LOOKUP_ROW_INVALID');
+        return Object.freeze({
+          repositoryId, pullNumber, headSha,
+          deliveryHash: row.delivery_hash, createdAt: row.created_at,
+        });
+      },
     }),
   });
 }
