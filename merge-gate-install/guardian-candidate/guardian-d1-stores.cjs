@@ -174,12 +174,25 @@ function createGuardianD1Stores(db) {
           positiveInteger(pullNumber) && SHA.test(headSha),
         'GUARDIAN_DELIVERY_RESERVATION_INVALID');
         // Permanent tombstones by default: no TTL deletion that could
-        // inadvertently re-enable an old GitHub delivery ID.
-        return (await run(db,
+        // inadvertently re-enable an old GitHub delivery ID. An INSERT result
+        // is not enough to authorize subsequent API calls: read back the exact
+        // committed record, and treat missing/ambiguous reads as HOLD.
+        const deliveryHash = sha256(deliveryId.toLowerCase());
+        const changed = await run(db,
           'INSERT OR IGNORE INTO guardian_delivery_receipts ' +
           '(delivery_hash, installation_id, pull_number, head_sha) ' +
           'VALUES (?, ?, ?, ?)',
-          [sha256(deliveryId.toLowerCase()), installationId, pullNumber, headSha])) === 1;
+          [deliveryHash, installationId, pullNumber, headSha]);
+        if (changed !== 1) return false;
+        const row = await first(db,
+          'SELECT delivery_hash, installation_id, pull_number, head_sha ' +
+          'FROM guardian_delivery_receipts WHERE delivery_hash = ?',
+          [deliveryHash]);
+        assert(row && row.delivery_hash === deliveryHash &&
+          row.installation_id === installationId &&
+          row.pull_number === pullNumber && row.head_sha === headSha,
+        'GUARDIAN_DELIVERY_RESERVATION_READBACK_INVALID');
+        return true;
       },
     }),
     conclusionStore: Object.freeze({
@@ -187,11 +200,26 @@ function createGuardianD1Stores(db) {
         assert(positiveInteger(repositoryId) && positiveInteger(pullNumber) &&
           SHA.test(headSha) && DELIVERY.test(deliveryId),
         'GUARDIAN_CONCLUSION_RESERVATION_INVALID');
-        return (await run(db,
+        const deliveryHash = sha256(deliveryId.toLowerCase());
+        const changed = await run(db,
           'INSERT OR IGNORE INTO guardian_conclusion_reservations ' +
           '(repository_id, pull_number, head_sha, delivery_hash) ' +
           'VALUES (?, ?, ?, ?)',
-          [repositoryId, pullNumber, headSha, sha256(deliveryId.toLowerCase())])) === 1;
+          [repositoryId, pullNumber, headSha, deliveryHash]);
+        if (changed !== 1) return false;
+        // Bind the SQL primary key and the delivery tombstone to the same
+        // event. Do not infer a successful, durable once-per-head reservation
+        // from a write acknowledgment that lacks its matching committed row.
+        const row = await first(db,
+          'SELECT repository_id, pull_number, head_sha, delivery_hash ' +
+          'FROM guardian_conclusion_reservations WHERE repository_id = ? ' +
+          'AND pull_number = ? AND head_sha = ?',
+          [repositoryId, pullNumber, headSha]);
+        assert(row && row.repository_id === repositoryId &&
+          row.pull_number === pullNumber && row.head_sha === headSha &&
+          row.delivery_hash === deliveryHash,
+        'GUARDIAN_CONCLUSION_RESERVATION_READBACK_INVALID');
+        return true;
       },
     }),
   });
