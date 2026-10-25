@@ -30,33 +30,31 @@ function nextPage(link) {
 }
 
 async function pagesArray(path, token, limit) {
-  const rows = [];
-  const firstPath = path + (path.includes('?') ? '&' : '?') + 'per_page=25&page=1';
-  let firstPage, firstLink;
+  const rows = [], observedPages = [];
   for (let page = 1; page <= Math.ceil(limit / 25) + 1; page++) {
     const currentPath = path + (path.includes('?') ? '&' : '?') +
       'per_page=25&page=' + page;
     const response = await readGuardianGithubJson(currentPath, token);
     requireProof(Array.isArray(response.body) && response.body.length <= 25,
       'GUARDIAN_PROVENANCE_PAGE_INVALID');
-    if (page === 1) {
-      firstPage = JSON.stringify(response.body);
-      firstLink = response.link;
-    }
+    // Independently retain every fetched page, not just page 1. If a middle
+    // page is replaced while pagination progresses, no partial list is safe.
+    observedPages.push({ path: currentPath, body: JSON.stringify(response.body),
+      link: response.link });
     rows.push(...response.body);
     requireProof(rows.length <= limit, 'GUARDIAN_PROVENANCE_PAGE_LIMIT');
     const more = nextPage(response.link);
     requireProof(!more || response.body.length === 25,
       'GUARDIAN_PROVENANCE_PAGINATION_INCOMPLETE');
     if (!more) {
-      // A PR file/review/commit list may change between GitHub pages, even
-      // while its total stays constant. Re-read the first page and fail
-      // closed on drift; this is still not a transactional GitHub snapshot.
-      const reread = await readGuardianGithubJson(firstPath, token);
-      requireProof(Array.isArray(reread.body) &&
-        JSON.stringify(reread.body) === firstPage &&
-        reread.link === firstLink,
-      'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+      for (const prior of observedPages) {
+        const reread = await readGuardianGithubJson(prior.path, token);
+        requireProof(Array.isArray(reread.body) &&
+          JSON.stringify(reread.body) === prior.body &&
+          reread.link === prior.link,
+        'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+      }
+      // This is a bounded consistency check, NOT an atomic GitHub snapshot.
       return rows;
     }
   }
@@ -64,22 +62,36 @@ async function pagesArray(path, token, limit) {
 }
 
 async function pagesCounted(path, key, token, limit) {
-  const rows = [];
+  const rows = [], observedPages = [];
   let total = null;
   for (let page = 1; page <= Math.ceil(limit / 25) + 1; page++) {
-    const response = await readGuardianGithubJson(path +
-      (path.includes('?') ? '&' : '?') + 'per_page=25&page=' + page, token);
+    const currentPath = path + (path.includes('?') ? '&' : '?') +
+      'per_page=25&page=' + page;
+    const response = await readGuardianGithubJson(currentPath, token);
     const body = response.body;
-    requireProof(object(body) && positive(body.total_count + 1) &&
-      body.total_count <= limit && Array.isArray(body[key]),
-    'GUARDIAN_PROVENANCE_COUNT_INVALID');
+    requireProof(object(body) && Number.isSafeInteger(body.total_count) &&
+      body.total_count >= 0 && body.total_count <= limit &&
+      Array.isArray(body[key]), 'GUARDIAN_PROVENANCE_COUNT_INVALID');
     if (total === null) total = body.total_count;
     requireProof(body.total_count === total &&
       body[key].length === Math.min(25, total - rows.length) &&
       nextPage(response.link) === (rows.length + body[key].length < total),
     'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+    observedPages.push({ path: currentPath, body: JSON.stringify(body),
+      link: response.link });
     rows.push(...body[key]);
-    if (rows.length === total) return rows;
+    if (rows.length === total) {
+      // Include empty collections and every workflow run/job page: replacing a
+      // success with a failure during enumeration must never produce ALLOW.
+      for (const prior of observedPages) {
+        const reread = await readGuardianGithubJson(prior.path, token);
+        requireProof(object(reread.body) &&
+          JSON.stringify(reread.body) === prior.body &&
+          reread.link === prior.link,
+        'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+      }
+      return rows;
+    }
   }
   throw new GuardianProvenanceError('GUARDIAN_PROVENANCE_PAGINATION_LIMIT');
 }
@@ -100,6 +112,12 @@ function reviewEvidence(reviews, release, authorId, headSha) {
       latest.set(review.user.id, review);
     }
   }
+  // An unresolved request for changes by ANY reviewer invalidates a
+  // conclusive positive claim. The designated allowlist must not hide
+  // a blocking review from another GitHub user.
+  requireProof(![...latest.values()].some((review) =>
+    review.state === 'CHANGES_REQUESTED'),
+  'GUARDIAN_REVIEW_CHANGES_REQUESTED');
   let approvals = 0;
   for (const id of release.reviewerIds) {
     const review = latest.get(id);
@@ -180,6 +198,7 @@ async function rulesetBypassEvidence(rules, token) {
     ids.add(rule.ruleset_id);
   }
   requireProof(ids.size > 0, 'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED');
+  const observed = [];
   for (const id of ids) {
     const response = await readGuardianGithubJson(PREFIX + '/rulesets/' + id,
       token);
@@ -193,7 +212,9 @@ async function rulesetBypassEvidence(rules, token) {
       'GUARDIAN_RULESET_BYPASS_ACTORS_UNOBSERVABLE');
     requireProof(response.body.bypass_actors.length === 0,
       'GUARDIAN_RULESET_BYPASS_ACTORS_PRESENT');
+    observed.push({ id, bytes: JSON.stringify(response.body), link: response.link });
   }
+  return observed;
 }
 
 function candidateScopedPath(filename) {
@@ -300,8 +321,14 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     new Set(commits.map((commit) => commit.sha)).size === commits.length &&
     commits[commits.length - 1].sha === headSha,
   'GUARDIAN_LAST_PR_COMMIT_NOT_EXACT_HEAD');
+  // GitHub allows unlinked author/committer accounts in commit history. If
+  // either identity is unknown, this source-only reader cannot exclude
+  // reviewer contribution, even with a valid SHA and exact commit count.
+  requireProof(commits.every((commit) =>
+    positive(commit.author?.id) && positive(commit.committer?.id)),
+  'GUARDIAN_COMMIT_ACTOR_IDENTITY_UNVERIFIED');
   const contributors = new Set(commits.flatMap((commit) =>
-    [commit.author?.id, commit.committer?.id].filter(positive)));
+    [commit.author.id, commit.committer.id]));
   requireProof(releasePolicy.reviewerIds.every((id) => !contributors.has(id)),
     'GUARDIAN_REVIEWER_IS_COMMIT_CONTRIBUTOR');
   requireProof(files.length === pr.changedFiles,
@@ -309,7 +336,7 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
   validateTouchedFiles(files);
   branchRulesEvidence(rules.body, guardianAppId, releasePolicy.minApprovals,
     expectedEvidence);
-  await rulesetBypassEvidence(rules.body, installationToken);
+  const initialRulesetState = await rulesetBypassEvidence(rules.body, installationToken);
   const approvedCount = reviewEvidence(reviews, releasePolicy, pr.author.id, headSha);
 
   const workflowProofs = [];
@@ -329,6 +356,23 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     workflowProofs.push(await workflowJobProof({ token: installationToken,
       headSha, check: policyChecks[0], binding }));
   }
+  // Runs/jobs can take time. A review can be revoked or a ruleset bypass
+  // introduced while those API reads are in progress. A final second-pass
+  // read closes this observed window; it is NOT an atomic GitHub transaction.
+  const finalReviews = await pagesArray(PREFIX + '/pulls/' + pullNumber +
+    '/reviews', installationToken, 500);
+  requireProof(JSON.stringify(finalReviews) === JSON.stringify(reviews),
+    'GUARDIAN_REVIEWS_CHANGED_DURING_PROVENANCE');
+  const finalRules = await readGuardianGithubJson(PREFIX + '/rules/branches/main',
+    installationToken);
+  requireProof(finalRules.link === rules.link &&
+    JSON.stringify(finalRules.body) === JSON.stringify(rules.body),
+  'GUARDIAN_RULES_CHANGED_DURING_PROVENANCE');
+  const finalRulesetState = await rulesetBypassEvidence(finalRules.body,
+    installationToken);
+  requireProof(JSON.stringify(finalRulesetState) ===
+    JSON.stringify(initialRulesetState),
+  'GUARDIAN_RULESETS_CHANGED_DURING_PROVENANCE');
   return Object.freeze({ approvedCount, lastCommitSha: headSha,
     workflowProofs, rulesetBoundToGuardianApp: true,
     rulesetBypassActorsVerified: true,

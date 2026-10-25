@@ -135,6 +135,22 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
   let files = [{ filename: 'src/a.cjs', status: 'modified' }];
   let driftFirstFilePage = false;
   let firstFilePageReads = 0;
+  let driftSecondFilePage = false;
+  let secondFilePageReads = 0;
+  let driftWorkflowRuns = false;
+  let workflowRunReads = 0;
+  let driftWorkflowJobs = false;
+  let workflowJobReads = 0;
+  let driftReviewPage = false;
+  let driftReviewAfterWorkflows = false;
+  let reviewPageReads = 0;
+  let driftRulesAfterWorkflows = false;
+  let branchRuleReads = 0;
+  let driftRulesetAfterWorkflows = false;
+  let rulesetReads = 0;
+  let commits = [{ sha: SHA, author: { id: 111 }, committer: { id: 111 } }];
+  let reviews = [{ id: 60, user: { id: 222, type: 'User' }, state: 'APPROVED',
+    submitted_at: '2026-10-23T12:00:00Z', commit_id: SHA }];
   let rulesAppId = 999;
   let rulesetBypassActors = [];
   let rulesetIdentity = 'valid';
@@ -147,12 +163,16 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
   ];
   collector.readGuardianGithubJson = async (path) => {
     if (path.includes('/pulls/12/commits')) return {
-      body: [{ sha: SHA, author: { id: 111 }, committer: { id: 111 } }], link: '',
+      body: commits, link: '',
     };
-    if (path.includes('/pulls/12/reviews')) return {
-      body: [{ id: 60, user: { id: 222, type: 'User' }, state: 'APPROVED',
-        submitted_at: '2026-10-23T12:00:00Z', commit_id: SHA }], link: '',
-    };
+    if (path.includes('/pulls/12/reviews')) {
+      ++reviewPageReads;
+      const mutate = (driftReviewPage && reviewPageReads === 2) ||
+        (driftReviewAfterWorkflows && reviewPageReads >= 3);
+      return { body: mutate ? reviews.map((review) => ({
+        ...review, state: 'CHANGES_REQUESTED',
+      })) : reviews, link: '' };
+    }
     if (path.includes('/pulls/12/files')) {
       const page = Number(new URL(path, 'https://api.github.com').searchParams.get('page'));
       const start = (page - 1) * 25;
@@ -161,6 +181,10 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
         rows = rows.map((item, index) => index === 0 ?
           { ...item, filename: 'src/changed-during-read.cjs' } : item);
       }
+      if (page === 2 && driftSecondFilePage && ++secondFilePageReads === 2) {
+        rows = rows.map((item, index) => index === 0 ?
+          { ...item, filename: 'src/changed-middle-page.cjs' } : item);
+      }
       return {
         body: rows,
         link: start + 25 < files.length ?
@@ -168,12 +192,14 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
             (page + 1) + '>; rel="next"' : '',
       };
     }
-    if (path.includes('/rules/branches/main')) return {
-      body: [
+    if (path.includes('/rules/branches/main')) {
+      ++branchRuleReads;
+      const lateChange = driftRulesAfterWorkflows && branchRuleReads >= 2;
+      return { body: [
         { type: 'required_status_checks', ruleset_id: rulesetIdentity === 'missing' ? undefined : 101,
           ruleset_source_type: 'Repository', ruleset_source: REPO, parameters: {
           required_status_checks: ruleChecks.map((item) => item.context === CHECK ?
-            { ...item, integration_id: rulesAppId } : item),
+            { ...item, integration_id: lateChange ? 12345 : rulesAppId } : item),
         } },
         { type: 'pull_request', ruleset_id: 101,
           ruleset_source_type: 'Repository', ruleset_source: REPO, parameters: {
@@ -183,15 +209,17 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
         } },
         ...(extraRuleset ? [{ type: 'creation', ruleset_id: 102,
           ruleset_source_type: 'Repository', ruleset_source: REPO }] : []),
-      ], link: '',
-    };
-    if (path.endsWith('/rulesets/101')) return {
-      body: {
+      ], link: '' };
+    }
+    if (path.endsWith('/rulesets/101')) {
+      ++rulesetReads;
+      return { body: {
         id: 101, target: 'branch', source_type: 'Repository', source: REPO,
-        enforcement: 'active',
+        enforcement: driftRulesetAfterWorkflows && rulesetReads >= 2 ?
+          'disabled' : 'active',
         ...(rulesetBypassActors === undefined ? {} : { bypass_actors: rulesetBypassActors }),
-      }, link: '',
-    };
+      }, link: '' };
+    }
     if (path.endsWith('/rulesets/102')) return {
       body: { id: 102, target: 'branch', source_type: 'Repository', source: REPO,
         enforcement: 'active', bypass_actors: extraRulesetBypassActors }, link: '',
@@ -200,10 +228,11 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     if (workflow) {
       const n = Number(workflow[1]);
       const id = n === 800 ? 1001 : 1002;
+      const mutated = n === 800 && driftWorkflowRuns && ++workflowRunReads === 2;
       return { body: { total_count: 1, workflow_runs: [{
         id, workflow_id: n, head_sha: SHA,
         check_suite_id: n === 800 ? 44 : 45, event: 'push',
-        status: 'completed', conclusion: 'success', run_attempt: 1,
+        status: 'completed', conclusion: mutated ? 'failure' : 'success', run_attempt: 1,
         created_at: '2026-10-23T12:00:00Z', updated_at: '2026-10-23T12:01:00Z',
         repository: { full_name: REPO },
       }] }, link: '' };
@@ -212,12 +241,13 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     if (jobs) {
       const id = Number(jobs[1]);
       const checkId = id === 1001 ? 501 : 502;
+      const mutated = id === 1001 && driftWorkflowJobs && ++workflowJobReads === 2;
       return { body: { total_count: 1, jobs: [{
         id: checkId + 100, check_run_url:
           'https://api.github.com/repos/nohandsai01/test/check-runs/' + checkId,
         run_id: id, run_attempt: 1, head_sha: SHA,
         name: id === 1001 ? 'tests-run' : 'ci-run',
-        status: 'completed', conclusion: 'success',
+        status: 'completed', conclusion: mutated ? 'failure' : 'success',
         completed_at: '2026-10-23T12:01:00Z',
       }] }, link: '' };
     }
@@ -400,9 +430,88 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_PROVENANCE_PAGE_CHANGED' });
     driftFirstFilePage = false;
+    driftSecondFilePage = true;
+    secondFilePageReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PROVENANCE_PAGE_CHANGED' });
+    driftSecondFilePage = false;
     files = [{ filename: 'src/a.cjs', status: 'modified' }];
     base.snapshot.pullRequest.changedFiles = 1;
     assert.equal((await collectGuardianConclusiveProvenance(base)).changedFileCount, 1);
+
+    // The PR's required workflow and job lists are mutable during reading.
+    // Reject a disappearing success even when the list count stays unchanged.
+    driftWorkflowRuns = true;
+    workflowRunReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PROVENANCE_PAGE_CHANGED' });
+    driftWorkflowRuns = false;
+    driftWorkflowJobs = true;
+    workflowJobReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PROVENANCE_PAGE_CHANGED' });
+    driftWorkflowJobs = false;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+
+    // Any unlinked author or committer makes reviewer independence unprovable.
+    for (const incomplete of [
+      { sha: SHA, author: null, committer: { id: 111 } },
+      { sha: SHA, author: { id: 111 }, committer: null },
+      { sha: SHA, author: { id: '111' }, committer: { id: 111 } },
+    ]) {
+      commits = [incomplete];
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_COMMIT_ACTOR_IDENTITY_UNVERIFIED' });
+    }
+    commits = [{ sha: SHA, author: { id: 222 }, committer: { id: 111 } }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_REVIEWER_IS_COMMIT_CONTRIBUTOR' });
+    commits = [{ sha: SHA, author: { id: 111 }, committer: { id: 111 } }];
+
+    // A blocking review by an outsider cannot be hidden by a distinct
+    // allowed approver. A later dismissal of that review restores eligibility.
+    reviews.push({ id: 61, user: { id: 333, type: 'User' },
+      state: 'CHANGES_REQUESTED', submitted_at: '2026-10-23T12:01:00Z',
+      commit_id: SHA });
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_REVIEW_CHANGES_REQUESTED' });
+    reviews.push({ id: 62, user: { id: 333, type: 'User' },
+      state: 'DISMISSED', submitted_at: '2026-10-23T12:02:00Z',
+      commit_id: SHA });
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+    reviews = reviews.slice(0, 1);
+    driftReviewPage = true;
+    reviewPageReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PROVENANCE_PAGE_CHANGED' });
+    driftReviewPage = false;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+
+    // A reviewer may revoke approval only after all initial review pages
+    // were stable. The final second-pass review comparison must still HOLD.
+    driftReviewAfterWorkflows = true;
+    reviewPageReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_REVIEWS_CHANGED_DURING_PROVENANCE' });
+    driftReviewAfterWorkflows = false;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+
+    // Same branch status-check contexts changing late cannot borrow an
+    // earlier Guardian pin or required-check protection observation.
+    driftRulesAfterWorkflows = true;
+    branchRuleReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_RULES_CHANGED_DURING_PROVENANCE' });
+    driftRulesAfterWorkflows = false;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+
+    // A ruleset can become inactive after its first trusted observation.
+    driftRulesetAfterWorkflows = true;
+    rulesetReads = 0;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED' });
+    driftRulesetAfterWorkflows = false;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
   } finally {
     collector.readGuardianGithubJson = prior;
     delete require.cache[provenancePath];
