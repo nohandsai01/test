@@ -140,20 +140,30 @@ async function confirmInstallationScope(token) {
   const pages = Math.max(1, Math.ceil(total / PER_PAGE));
   let found = false;
   let fetched = 0;
+  const observedPages = [];
   for (let page = 1; page <= pages; page++) {
-    const response = page === 1 ? first :
-      await getJson('/installation/repositories?per_page=25&page=' + page, token);
+    const pagePath = '/installation/repositories?per_page=25&page=' + page;
+    const response = page === 1 ? first : await getJson(pagePath, token);
     guard(countResponse(response, 'repositories', MAX_INSTALLATION_REPOS) === total,
       'GITHUB_INSTALLATION_PAGE_CHANGED');
     const expected = Math.min(PER_PAGE, total - fetched);
     guard(response.body.repositories.length === expected &&
       nextPage(response.link) === (page < pages), 'GITHUB_INSTALLATION_PAGE_INCOMPLETE');
+    observedPages.push({ path: pagePath, bytes: JSON.stringify(response.body),
+      link: response.link });
     for (const repo of response.body.repositories) {
       guard(object(repo) && typeof repo.full_name === 'string',
         'GITHUB_INSTALLATION_REPO_INVALID');
       if (repo.full_name === REPO) found = true;
     }
     fetched += expected;
+  }
+  // A repository can be removed from an installation while later pages are
+  // read. Re-check each page and its pagination metadata before accepting scope.
+  for (const original of observedPages) {
+    const repeat = await getJson(original.path, token);
+    guard(JSON.stringify(repeat.body) === original.bytes &&
+      repeat.link === original.link, 'GITHUB_INSTALLATION_PAGE_CHANGED');
   }
   guard(found, 'GITHUB_APP_INSTALLATION_SCOPE_MISMATCH');
 }
@@ -187,13 +197,16 @@ async function collectAuthenticatedGithubSnapshot({ pullNumber, expectedHeadSha,
   const total = countResponse(first, 'check_runs', MAX_CHECKS);
   const pages = Math.max(1, Math.ceil(total / PER_PAGE));
   const runs = [];
-  const ids = new Set();
+  const ids = new Set(), observedPages = [];
   for (let page = 1; page <= pages; page++) {
-    const response = page === 1 ? first : await getJson(runsPath + page, installationToken);
+    const pagePath = runsPath + page;
+    const response = page === 1 ? first : await getJson(pagePath, installationToken);
     guard(countResponse(response, 'check_runs', MAX_CHECKS) === total,
       'GITHUB_CHECK_PAGE_CHANGED');
     guard(response.body.check_runs.length === Math.min(PER_PAGE, total - runs.length) &&
       nextPage(response.link) === (page < pages), 'GITHUB_CHECK_PAGE_INCOMPLETE');
+    observedPages.push({ path: pagePath, bytes: JSON.stringify(response.body),
+      link: response.link });
     for (const raw of response.body.check_runs) {
       const run = normalizedCheck(raw);
       guard(Number.isSafeInteger(run.id) && run.id > 0 && !ids.has(run.id) &&
@@ -204,13 +217,16 @@ async function collectAuthenticatedGithubSnapshot({ pullNumber, expectedHeadSha,
   }
   guard(runs.length === total, 'GITHUB_CHECK_PAGE_INCOMPLETE');
 
-  // Detect some concurrent changes. This is NOT an atomic GitHub snapshot,
-  // nor proof of last push, workflow provenance, or independent check issuer.
-  const repeat = await getJson(runsPath + '1', installationToken);
-  guard(countResponse(repeat, 'check_runs', MAX_CHECKS) === total &&
-    JSON.stringify(repeat.body.check_runs.map(normalizedCheck)) ===
-      JSON.stringify(first.body.check_runs.map(normalizedCheck)),
-  'GITHUB_CHECKS_CHANGED_DURING_READ');
+  // A later check-suite rerun can change page 2 without changing page 1.
+  // Re-read ALL pages, including an empty first page, and compare raw rows,
+  // counts and links. This is not an atomic snapshot or proof of issuer trust.
+  for (const original of observedPages) {
+    const repeat = await getJson(original.path, installationToken);
+    guard(countResponse(repeat, 'check_runs', MAX_CHECKS) === total &&
+      JSON.stringify(repeat.body) === original.bytes &&
+      repeat.link === original.link,
+    'GITHUB_CHECKS_CHANGED_DURING_READ');
+  }
   const finalPr = normalizedPr((await getJson(prPath, installationToken)).body);
   guard(JSON.stringify(finalPr) === JSON.stringify(firstPr),
     'GITHUB_PR_CHANGED_DURING_READ');

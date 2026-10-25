@@ -259,6 +259,10 @@ function validateTouchedFiles(files) {
 async function workflowJobProof({ token, headSha, check, binding }) {
   const runs = await pagesCounted(PREFIX + '/actions/workflows/' +
     binding.workflowId + '/runs?head_sha=' + headSha, 'workflow_runs', token, 60);
+  // A good check-suite is not sufficient when the same workflow/head has
+  // a newer failed run. Refuse ambiguous competing runs rather than selecting
+  // only the successful one to prove the required workflow.
+  requireProof(runs.length === 1, 'GUARDIAN_WORKFLOW_RUN_AMBIGUOUS');
   const linked = runs.filter((run) => object(run) &&
     run.check_suite_id === check.check_suite?.id);
   requireProof(linked.length === 1, 'GUARDIAN_WORKFLOW_RUN_AMBIGUOUS');
@@ -278,7 +282,12 @@ async function workflowJobProof({ token, headSha, check, binding }) {
     matched[0].head_sha === headSha && matched[0].name === check.name &&
     matched[0].status === 'completed' && matched[0].conclusion === 'success' &&
     matched[0].run_attempt === run.run_attempt &&
-    timestamp(matched[0].completed_at),
+    positive(matched[0].id) && timestamp(matched[0].completed_at) &&
+    timestamp(check.completed_at) &&
+    Date.parse(matched[0].completed_at) >= Date.parse(run.created_at) &&
+    Date.parse(matched[0].completed_at) <= Date.parse(run.updated_at) &&
+    Date.parse(check.completed_at) >= Date.parse(run.created_at) &&
+    Date.parse(check.completed_at) <= Date.parse(run.updated_at),
   'GUARDIAN_CHECK_NOT_ASSOCIATED_WITH_WORKFLOW_JOB');
   return { workflowId: binding.workflowId, runId: run.id,
     jobId: matched[0].id, checkRunId: check.id };
@@ -289,7 +298,10 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
   requireProof(positive(pullNumber) && SHA.test(headSha) &&
     typeof installationToken === 'string' && installationToken.length >= 16 &&
     object(snapshot) && object(snapshot.pullRequest) &&
-    object(snapshot.checkRuns) && object(releasePolicy) &&
+    object(snapshot.checkRuns) && Array.isArray(snapshot.checkRuns.check_runs) &&
+    Number.isSafeInteger(snapshot.checkRuns.total_count) &&
+    snapshot.checkRuns.total_count === snapshot.checkRuns.check_runs.length &&
+    object(releasePolicy) &&
     Array.isArray(expectedEvidence) && expectedEvidence.length === 2 &&
     releasePolicy.guardianAppId === guardianAppId && positive(guardianAppId),
   'GUARDIAN_CONCLUSIVE_INPUT_INVALID');
@@ -345,14 +357,17 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     requireProof(matching.length === 1, 'GUARDIAN_WORKFLOW_POLICY_AMBIGUOUS');
     const spec = expectedEvidence.filter((item) => item.type === binding.type);
     requireProof(spec.length === 1, 'GUARDIAN_EXPECTED_CHECK_POLICY_AMBIGUOUS');
-    const policyChecks = snapshot.checkRuns.check_runs.filter((check) =>
-      check.name === spec[0].checkName && check.app?.id === spec[0].issuerAppId &&
-      check.head_sha === headSha && check.status === 'completed' &&
-      check.conclusion === 'success');
-    // A caller must supply the independently signed expected check mappings;
-    // never infer them from a run's self-reported name.
-    requireProof(policyChecks.length === 1,
+    // Require uniqueness BEFORE considering success. A failed/pending check
+    // with the same required name cannot be hidden by selecting one green run.
+    const named = snapshot.checkRuns.check_runs.filter((check) =>
+      object(check) && check.name === spec[0].checkName);
+    requireProof(named.length === 1 &&
+      named[0].app?.id === spec[0].issuerAppId &&
+      named[0].head_sha === headSha && named[0].status === 'completed' &&
+      named[0].conclusion === 'success' && positive(named[0].id) &&
+      positive(named[0].check_suite?.id),
       'GUARDIAN_WORKFLOW_EXPECTED_CHECK_MISSING');
+    const policyChecks = named;
     workflowProofs.push(await workflowJobProof({ token: installationToken,
       headSha, check: policyChecks[0], binding }));
   }

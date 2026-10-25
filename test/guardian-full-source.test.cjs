@@ -139,6 +139,9 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
   let secondFilePageReads = 0;
   let driftWorkflowRuns = false;
   let workflowRunReads = 0;
+  let competingWorkflowRun = false;
+  let jobAttempt = 1;
+  let jobCompletedAt = '2026-10-23T12:01:00Z';
   let driftWorkflowJobs = false;
   let workflowJobReads = 0;
   let driftReviewPage = false;
@@ -229,13 +232,19 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
       const n = Number(workflow[1]);
       const id = n === 800 ? 1001 : 1002;
       const mutated = n === 800 && driftWorkflowRuns && ++workflowRunReads === 2;
-      return { body: { total_count: 1, workflow_runs: [{
+      const primary = {
         id, workflow_id: n, head_sha: SHA,
         check_suite_id: n === 800 ? 44 : 45, event: 'push',
         status: 'completed', conclusion: mutated ? 'failure' : 'success', run_attempt: 1,
         created_at: '2026-10-23T12:00:00Z', updated_at: '2026-10-23T12:01:00Z',
         repository: { full_name: REPO },
-      }] }, link: '' };
+      };
+      const runs = [primary];
+      if (competingWorkflowRun && n === 800) {
+        runs.push({ ...primary, id: 1099, check_suite_id: 99,
+          conclusion: 'failure', run_attempt: 2 });
+      }
+      return { body: { total_count: runs.length, workflow_runs: runs }, link: '' };
     }
     const jobs = /\/actions\/runs\/(\d+)\/jobs/.exec(path);
     if (jobs) {
@@ -245,10 +254,10 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
       return { body: { total_count: 1, jobs: [{
         id: checkId + 100, check_run_url:
           'https://api.github.com/repos/nohandsai01/test/check-runs/' + checkId,
-        run_id: id, run_attempt: 1, head_sha: SHA,
+        run_id: id, run_attempt: jobAttempt, head_sha: SHA,
         name: id === 1001 ? 'tests-run' : 'ci-run',
         status: 'completed', conclusion: mutated ? 'failure' : 'success',
-        completed_at: '2026-10-23T12:01:00Z',
+        completed_at: jobCompletedAt,
       }] }, link: '' };
     }
     throw new Error('Unexpected GitHub endpoint: ' + path);
@@ -264,11 +273,13 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     snapshot: { pullRequest: { number: 12, state: 'open', draft: false,
       changedFiles: 1, commitCount: 1,
       author: { id: 111, type: 'User' }, head: { sha: SHA } },
-    checkRuns: { check_runs: [
+    checkRuns: { total_count: 2, check_runs: [
       { id: 501, name: 'tests-run', app: { id: 777 }, check_suite: { id: 44 },
-        head_sha: SHA, status: 'completed', conclusion: 'success' },
+        head_sha: SHA, status: 'completed', conclusion: 'success',
+        completed_at: '2026-10-23T12:01:00Z' },
       { id: 502, name: 'ci-run', app: { id: 778 }, check_suite: { id: 45 },
-        head_sha: SHA, status: 'completed', conclusion: 'success' },
+        head_sha: SHA, status: 'completed', conclusion: 'success',
+        completed_at: '2026-10-23T12:01:00Z' },
     ] } },
   };
   try {
@@ -511,6 +522,45 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED' });
     driftRulesetAfterWorkflows = false;
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+
+    // A conflicting red Check is not hidden by picking an earlier green
+    // Check with the same required workflow context.
+    base.snapshot.checkRuns.check_runs.push({
+      ...base.snapshot.checkRuns.check_runs[0], id: 909,
+      conclusion: 'failure',
+    });
+    base.snapshot.checkRuns.total_count = 3;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_WORKFLOW_EXPECTED_CHECK_MISSING' });
+    base.snapshot.checkRuns.check_runs.pop();
+    base.snapshot.checkRuns.total_count = 2;
+
+    // Even a second same-head run of the approved workflow is ambiguous,
+    // regardless of which check-suite is linked to the passing Check.
+    competingWorkflowRun = true;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_WORKFLOW_RUN_AMBIGUOUS' });
+    competingWorkflowRun = false;
+
+    // A stale job or check cannot be claimed after the run has ended or
+    // before the run started; exact attempt numbers are also required.
+    jobAttempt = 2;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_CHECK_NOT_ASSOCIATED_WITH_WORKFLOW_JOB' });
+    jobAttempt = 1;
+    jobCompletedAt = '2026-10-23T12:05:00Z';
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_CHECK_NOT_ASSOCIATED_WITH_WORKFLOW_JOB' });
+    jobCompletedAt = '2026-10-23T12:01:00Z';
+    base.snapshot.checkRuns.check_runs[0].completed_at = '2026-10-23T11:59:59Z';
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_CHECK_NOT_ASSOCIATED_WITH_WORKFLOW_JOB' });
+    base.snapshot.checkRuns.check_runs[0].completed_at = '2026-10-23T12:01:00Z';
+    base.snapshot.checkRuns.total_count = 1;
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_CONCLUSIVE_INPUT_INVALID' });
+    base.snapshot.checkRuns.total_count = 2;
     assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
   } finally {
     collector.readGuardianGithubJson = prior;
