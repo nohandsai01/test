@@ -488,15 +488,37 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
       { code: 'GUARDIAN_REVIEWER_IS_COMMIT_CONTRIBUTOR' });
     commits = [{ sha: SHA, author: { id: 111 }, committer: { id: 111 } }];
 
-    // A blocking review by an outsider cannot be hidden by a distinct
-    // allowed approver. A later dismissal of that review restores eligibility.
+    // A blocking review by ANY user cannot be hidden by a distinct
+    // approved reviewer. A later COMMENTED review by that same user does
+    // not erase CHANGES_REQUESTED; only dismissal or a real decision does.
     reviews.push({ id: 61, user: { id: 333, type: 'User' },
       state: 'CHANGES_REQUESTED', submitted_at: '2026-10-23T12:01:00Z',
       commit_id: SHA });
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_REVIEW_CHANGES_REQUESTED' });
     reviews.push({ id: 62, user: { id: 333, type: 'User' },
-      state: 'DISMISSED', submitted_at: '2026-10-23T12:02:00Z',
+      state: 'COMMENTED', submitted_at: '2026-10-23T12:02:00Z',
+      commit_id: SHA });
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_REVIEW_CHANGES_REQUESTED' });
+    // The designated reviewer still has a valid exact-head approval (id 60);
+    // an ordinary later comment cannot revoke or replace that approval.
+    reviews = reviews.slice(0, 1);
+    reviews.push({ id: 63, user: { id: 222, type: 'User' },
+      state: 'COMMENTED', submitted_at: '2026-10-23T12:03:00Z',
+      commit_id: SHA });
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+    reviews = reviews.slice(0, 1);
+    // An actual GitHub dismissal of an outstanding changes request restores
+    // eligibility, even if the requester posted a harmless comment first.
+    reviews.push({ id: 64, user: { id: 333, type: 'User' },
+      state: 'CHANGES_REQUESTED', submitted_at: '2026-10-23T12:01:00Z',
+      commit_id: SHA });
+    reviews.push({ id: 65, user: { id: 333, type: 'User' },
+      state: 'COMMENTED', submitted_at: '2026-10-23T12:02:00Z',
+      commit_id: SHA });
+    reviews.push({ id: 66, user: { id: 333, type: 'User' },
+      state: 'DISMISSED', submitted_at: '2026-10-23T12:04:00Z',
       commit_id: SHA });
     assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
     reviews = reviews.slice(0, 1);

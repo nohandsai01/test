@@ -105,7 +105,10 @@ function reviewEvidence(reviews, release, authorId, headSha) {
       (review.state === 'PENDING' || timestamp(review.submitted_at)),
     'GUARDIAN_REVIEW_RESPONSE_INVALID');
     ids.add(review.id);
-    if (review.state === 'PENDING') continue;
+    // A COMMENTED review does not change the reviewer's decision on GitHub.
+    // Keep the last APPROVED, CHANGES_REQUESTED or DISMISSED state instead;
+    // otherwise a later ordinary comment can erase a blocking change request.
+    if (review.state === 'PENDING' || review.state === 'COMMENTED') continue;
     const prior = latest.get(review.user.id);
     if (!prior || Date.parse(review.submitted_at) > Date.parse(prior.submitted_at) ||
         (review.submitted_at === prior.submitted_at && review.id > prior.id)) {
