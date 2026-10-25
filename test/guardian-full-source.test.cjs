@@ -268,6 +268,26 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
     files = [{ filename: '.github/workflows/hijack.yml', status: 'added' }];
     await assert.rejects(collectGuardianConclusiveProvenance(base),
       { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
+    // A GitHub rename reports both paths. An allowed destination must not
+    // conceal a workflow or traversal-containing origin.
+    for (const oldPath of [
+      '.github/workflows/hijack.yml',
+      'src/../.github/workflows/hijack.yml',
+      'src/./legacy.cjs',
+      'src//legacy.cjs',
+    ]) {
+      files = [{ filename: 'src/moved.cjs', previous_filename: oldPath, status: 'renamed' }];
+      await assert.rejects(collectGuardianConclusiveProvenance(base),
+        { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
+    }
+    files = [{ filename: 'src/../docs/moved.cjs',
+      previous_filename: 'src/legacy.cjs', status: 'renamed' }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE' });
+    files = [{ filename: 'src/moved.cjs',
+      previous_filename: 'src/legacy.cjs', status: 'renamed' }];
+    const validRename = await collectGuardianConclusiveProvenance(base);
+    assert.equal(validRename.changedFileCount, 1);
   } finally {
     collector.readGuardianGithubJson = prior;
     delete require.cache[provenancePath];

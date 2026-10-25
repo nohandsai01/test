@@ -179,6 +179,14 @@ async function rulesetBypassEvidence(rules, token) {
   }
 }
 
+function candidateScopedPath(filename) {
+  // GitHub rename entries contain two paths. Both must satisfy the same
+  // restriction: a protected source cannot be moved into an allowed folder.
+  return typeof filename === 'string' && filename.length < 500 &&
+    /^(src|test|docs)\/[A-Za-z0-9._/\-]+$/.test(filename) &&
+    filename.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
+}
+
 function validateTouchedFiles(files) {
   requireProof(files.length > 0, 'GUARDIAN_PR_NO_CHANGED_FILES');
   const seen = new Set();
@@ -189,12 +197,9 @@ function validateTouchedFiles(files) {
     'GUARDIAN_PR_FILE_RESPONSE_INVALID');
     seen.add(file.filename);
     // Workflow source must not be supplied or changed by the PR author.
-    // This candidate only approves the repository's bounded application scope.
-    requireProof(/^(src|test|docs)\/[A-Za-z0-9._/\-]+$/.test(file.filename) &&
-      !file.filename.split('/').includes('..') &&
-      (file.status !== 'renamed' ||
-        (typeof file.previous_filename === 'string' &&
-         /^(src|test|docs)\/[A-Za-z0-9._/\-]+$/.test(file.previous_filename))),
+    // A renamed source is a two-path change: validate its old and new names.
+    requireProof(candidateScopedPath(file.filename) &&
+      (file.status !== 'renamed' || candidateScopedPath(file.previous_filename)),
     'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE');
   }
 }
