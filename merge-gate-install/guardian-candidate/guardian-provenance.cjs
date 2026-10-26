@@ -110,8 +110,14 @@ function reviewEvidence(reviews, release, authorId, headSha) {
     // otherwise a later ordinary comment can erase a blocking change request.
     if (review.state === 'PENDING' || review.state === 'COMMENTED') continue;
     const prior = latest.get(review.user.id);
-    if (!prior || Date.parse(review.submitted_at) > Date.parse(prior.submitted_at) ||
-        (review.submitted_at === prior.submitted_at && review.id > prior.id)) {
+    // GitHub can encode the exact same instant as ...:00Z or ...:00.000Z.
+    // Compare parsed instants, then break ties by review ID. A later
+    // CHANGES_REQUESTED must never lose to an older exact-head APPROVED
+    // merely because the two valid timestamp strings differ in spelling.
+    const submittedTime = Date.parse(review.submitted_at);
+    const priorTime = prior ? Date.parse(prior.submitted_at) : null;
+    if (!prior || submittedTime > priorTime ||
+        (submittedTime === priorTime && review.id > prior.id)) {
       latest.set(review.user.id, review);
     }
   }

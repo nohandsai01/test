@@ -522,6 +522,55 @@ test('conclusive provenance requires exact workflow jobs, reviewer and app-pinne
       commit_id: SHA });
     assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
     reviews = reviews.slice(0, 1);
+    // Same instant, different valid ISO spellings: numeric ID decides the
+    // later decision. An APPROVED at :00Z must never suppress a higher-ID
+    // CHANGES_REQUESTED at :00.000Z (nor the other spelling/order).
+    for (const [earlier, later] of [
+      ['2026-10-23T12:04:00Z', '2026-10-23T12:04:00.000Z'],
+      ['2026-10-23T12:04:00.000Z', '2026-10-23T12:04:00Z'],
+    ]) {
+      for (const chronological of [true, false]) {
+        const approved = { id: 67, user: { id: 333, type: 'User' },
+          state: 'APPROVED', submitted_at: earlier, commit_id: SHA };
+        const requested = { id: 68, user: { id: 333, type: 'User' },
+          state: 'CHANGES_REQUESTED', submitted_at: later, commit_id: SHA };
+        reviews = [reviews[0], ...(chronological
+          ? [approved, requested] : [requested, approved])];
+        await assert.rejects(collectGuardianConclusiveProvenance(base),
+          { code: 'GUARDIAN_REVIEW_CHANGES_REQUESTED' });
+      }
+    }
+    // A higher-ID DISMISSED or APPROVED decision on that same instant really
+    // supersedes the preceding change request, without dropping other guards.
+    reviews = [reviews[0],
+      { id: 70, user: { id: 333, type: 'User' },
+        state: 'CHANGES_REQUESTED', submitted_at: '2026-10-23T12:05:00.000Z', commit_id: SHA },
+      { id: 71, user: { id: 333, type: 'User' },
+        state: 'DISMISSED', submitted_at: '2026-10-23T12:05:00Z', commit_id: SHA }];
+    assert.equal((await collectGuardianConclusiveProvenance(base)).approvedCount, 1);
+    // A lower-ID DISMISSED at the same instant cannot erase a later change request.
+    reviews = [reviews[0],
+      { id: 72, user: { id: 333, type: 'User' },
+        state: 'CHANGES_REQUESTED', submitted_at: '2026-10-23T12:06:00Z', commit_id: SHA },
+      { id: 69, user: { id: 333, type: 'User' },
+        state: 'DISMISSED', submitted_at: '2026-10-23T12:06:00.000Z', commit_id: SHA }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_REVIEW_CHANGES_REQUESTED' });
+    // Ordinary comments never decide even if their timestamp spelling differs.
+    reviews = [reviews[0],
+      { id: 73, user: { id: 333, type: 'User' },
+        state: 'CHANGES_REQUESTED', submitted_at: '2026-10-23T12:07:00.000Z', commit_id: SHA },
+      { id: 74, user: { id: 333, type: 'User' },
+        state: 'COMMENTED', submitted_at: '2026-10-23T12:07:00Z', commit_id: SHA }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_REVIEW_CHANGES_REQUESTED' });
+    // A malformed COMMENTED review remains invalid before state selection.
+    reviews = [reviews[0],
+      { id: 75, user: { id: 333, type: 'User' },
+        state: 'COMMENTED', submitted_at: 'invalid-date', commit_id: SHA }];
+    await assert.rejects(collectGuardianConclusiveProvenance(base),
+      { code: 'GUARDIAN_REVIEW_RESPONSE_INVALID' });
+    reviews = reviews.slice(0, 1);
     driftReviewPage = true;
     reviewPageReads = 0;
     await assert.rejects(collectGuardianConclusiveProvenance(base),
