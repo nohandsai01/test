@@ -511,3 +511,81 @@ test('operator reconciliation consumes real persisted D1 reservation but makes n
     }
   });
 });
+
+test('operator batch reads multiple real SQLite D1 tombstones without mutation or retry authority', async () => {
+  await fixture(async ({ first, second, firstDb }) => {
+    const secondHead = 'b'.repeat(40);
+    assert.equal(await first.conclusionStore.reserveOnce(CLAIM), true);
+    assert.equal(await first.conclusionStore.reserveOnce({
+      repositoryId: 88, pullNumber: 13, headSha: secondHead, deliveryId: ALT_DELIVERY,
+    }), true);
+    const originalRows = firstDb.prepare(
+      'SELECT repository_id, pull_number, head_sha, delivery_hash, created_at ' +
+      'FROM guardian_conclusion_reservations ORDER BY pull_number').all();
+    assert.equal(originalRows.length, 2);
+    const collectorPath = require.resolve(
+      '../merge-gate-install/guardian-candidate/github-rest-collector.cjs');
+    const reconcilePath = require.resolve(
+      '../merge-gate-install/guardian-candidate/guardian-conclusion-reconcile.cjs');
+    const batchPath = require.resolve(
+      '../merge-gate-install/guardian-candidate/guardian-conclusion-batch.cjs');
+    const collector = require(collectorPath);
+    const original = collector.collectAuthenticatedGithubSnapshot;
+    const remoteTargets = [];
+    collector.collectAuthenticatedGithubSnapshot = async ({ pullNumber,
+      expectedHeadSha }) => {
+      remoteTargets.push(pullNumber);
+      return {
+        repository: 'nohandsai01/test',
+        pullRequest: { number: pullNumber,
+          base: { ref: 'main', repo: { full_name: 'nohandsai01/test' } },
+          head: { sha: expectedHeadSha, repo: { full_name: 'nohandsai01/test' } },
+        },
+        checkRuns: { total_count: 1, check_runs: [{
+          id: 700 + pullNumber, name: 'NO HANDS Merge Gate Required Check',
+          head_sha: expectedHeadSha, app: { id: 999 }, status: 'completed',
+          conclusion: 'success', completed_at: new Date(Date.now() + 60_000).toISOString(),
+        }] },
+      };
+    };
+    delete require.cache[reconcilePath];
+    delete require.cache[batchPath];
+    try {
+      const { reconcileGuardianConclusionBatch } = require(batchPath);
+      const report = await reconcileGuardianConclusionBatch({
+        repositoryId: 88, expectedAppId: 999,
+        installationToken: 'synthetic-readonly-long-token',
+        conclusionStore: second.conclusionStore,
+        targets: [
+          { pullNumber: 12, headSha: SHA },
+          { pullNumber: 13, headSha: secondHead },
+          { pullNumber: 14, headSha: SHA },
+        ],
+      });
+      assert.equal(report.status, 'SOURCE_ONLY_HOLD');
+      assert.equal(report.releaseAuthorized, false);
+      assert.equal(report.automaticRetryAllowed, false);
+      assert.deepEqual(report.entries.map(item => item.reason), [
+        'RECONCILIATION_CHECK_OBSERVED_ONLY',
+        'RECONCILIATION_CHECK_OBSERVED_ONLY',
+        'RECONCILIATION_NO_RESERVATION',
+      ]);
+      assert.deepEqual(remoteTargets, [12, 13]);
+      assert.deepEqual(firstDb.prepare(
+        'SELECT repository_id, pull_number, head_sha, delivery_hash, created_at ' +
+        'FROM guardian_conclusion_reservations ORDER BY pull_number').all(), originalRows,
+      'batch did not mutate either durable reservation');
+      assert.equal(await second.conclusionStore.reserveOnce({
+        ...CLAIM, deliveryId: ALT_DELIVERY,
+      }), false, 'observing a Check cannot release the once-per-head slot');
+      assert.equal(firstDb.prepare(
+        'SELECT COUNT(*) AS n FROM guardian_conclusion_reservations').get().n, 2);
+      assert.ok(!JSON.stringify(report).includes(originalRows[0].delivery_hash));
+      assert.ok(!JSON.stringify(report).includes('synthetic-readonly-long-token'));
+    } finally {
+      collector.collectAuthenticatedGithubSnapshot = original;
+      delete require.cache[reconcilePath];
+      delete require.cache[batchPath];
+    }
+  });
+});

@@ -523,3 +523,28 @@ combined run was blocked by this executor's read-only `/tmp` (`EROFS`), not by
 a code assertion; it was not repeatedly rerun. No QA agent, hosted CI,
 App installation, D1 migration, deployment, merge, or real payment was
 performed in G10.
+
+## Bounded operator Check triage — source-only, default HOLD
+
+`guardian-conclusion-batch.cjs` exports
+`reconcileGuardianConclusionBatch({ repositoryId, expectedAppId,
+installationToken, conclusionStore, targets })`. The protected operator host
+(not a public PR/webhook input) supplies a repository-scoped read token and the
+verified D1 `conclusionStore.getReservation` adapter. `targets` contains 1–8
+unique `{ pullNumber, headSha }` pairs. Every identity is pinned before reads;
+invalid or repeated targets reject the **entire batch without D1/GitHub I/O**.
+
+The batch sequentially performs each existing authenticated, read-only single
+Check reconciliation; one unavailable target does not conceal the observations
+for another. The frozen report contains reason counts and strictly allowlisted,
+non-secret per-target metadata. It never includes the installation token,
+delivery digest, or raw remote payload. Missing Check does **not** imply a
+failed Check POST or permit a second attempt. Even if GitHub shows an apparently
+successful Check, every entry and the batch itself is `SOURCE_ONLY_HOLD` with
+`automaticRetryAllowed=false`, `releaseAuthorized=false` and no Check writer.
+
+This library is **not wired into a live HTTP route, scheduler, GitHub App or
+production D1**. Its offline tests use a stubbed GitHub transport and a real
+isolated SQLite D1 adapter. Operator authentication, live network proof,
+independent runtime deployment, Check publication and release remain separate
+Founder-gated requirements.
