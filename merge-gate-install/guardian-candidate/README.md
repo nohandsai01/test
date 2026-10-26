@@ -1041,3 +1041,38 @@ the diagnostics constructor ran cannot silently result in a clean report.
 Controller status fields are taken once from ordinary own data properties,
 not accessors or unrecognized status fields; malformed/hostile status
 objects are unverified, never a basis for a clean stop or fault packet.
+
+## G20 — Independent read-only local incident packet comparison (source-only)
+
+The separate `guardian-local-evidence-verifier.cjs` module accepts an
+existing G19 `incidentEvidence()` packet and compares it with the exact
+owner-owned local journal bytes read from a private owner-configured file.
+It NEVER calls `incidentEvidence()` or relies on any of the packet's
+reported fields as the source of truth. It independently validates the
+whole bounded journal: duplicate JSON fields and event IDs, schema,
+timestamps, state, owner-only file permissions, pinned directory identity,
+file inode/size/metadata stability and SHA-256 over actual observed bytes.
+
+Only packets with an exact field allowlist, data properties, fixed
+non-authorizing values and a reconstructed canonical packet SHA-256
+are considered for comparison. MATCH requires the same journal bytes,
+event count, selected failure position, preceding/following receipts,
+first/latest failures and failure count. A forged or stale context fails
+closed, even if a caller recomputes the packet digest. Responses are
+fixed-size, frozen and sanitized: no raw journal, arbitrary error, key,
+token, PID, Check payload or path is returned.
+
+The Operator-only facade exposes `verifyIncidentEvidence(packet)`.
+Its positive result is deliberately `MATCH_LOCAL_SNAPSHOT_ONLY`, NOT
+proof of trusted source custody or process-controller identity. Both
+positive and negative outcomes preserve SOURCE_ONLY_HOLD,
+manualInterventionRequired=true, activationAllowed=false,
+automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED.
+
+Scope limit: this proves internal consistency with local readable bytes
+at one observation, NOT process liveness, independent custody, evidence
+signatures, restart approval, audit-grade provenance, hosted D1 integrity
+or authorization to publish any GitHub Check. A local write-capable
+adversary can replace the journal AND reconstruct both digests. No
+signing keys, credentials, writable operator APIs, Merge, Deploy or
+activation transitions are added.
