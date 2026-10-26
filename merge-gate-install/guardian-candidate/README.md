@@ -1116,3 +1116,48 @@ comparison. Relative detection is against the immediately preceding
 in-process observation. It does not establish independent custody, protect
 against a hostile writer before first read or persist an anchor on restart.
 No D1, GitHub App, Check publication or deployment actions are introduced.
+
+
+## G22 — Operator-only bounded fault triage and manual action cues (source-only)
+
+guardian-local-diagnostics.cjs now exposes faultTriage() from exactly
+one protected, owner-owned journal read and one validated Controller status
+observation. The separated guardian-local-operator-session.cjs facade
+exposes the same read-only method to Operators without modifying the Owner
+start/stop surface. Import and construction remain inert.
+
+A frozen allowlisted summary provides a four-level local investigation
+priority (P0 through P3), static classification/next-action codes, state,
+journal count/hash and first/latest recorded failure IDs/timestamps/error
+codes. It does NOT return a PID, file path, raw JSONL, credentials, arbitrary
+exception messages, GitHub Check payload, restart controls or raw D1 data.
+
+- **P0 EVIDENCE_UNVERIFIED:** Controller identity/state or journal evidence
+  is inaccessible, malformed, replaced, insecure or changed during read;
+  Owner must investigate protected local evidence. This is not a confirmed
+  tampering claim. A RUNNING Controller without a terminal journal is also
+  P0, because it cannot be verified from persisted receipts alone.
+- **P1 RECORDED_FAILURE / CONTROLLER_FAILED:** any previously validated FAILED
+  receipt, *even after later STOPPED receipts*, or a currently failed
+  Controller. Owner must review history or investigate controller failure.
+- **P2 NO_LOCAL_BASELINE / PROCESS_STATE_UNPROVEN:** an inert CREATED
+  Controller before its first journal exists, or a non-terminal lifecycle
+  state with a valid prior journal; Owner must verify prerequisites or
+  reconcile process lifecycle, not infer liveness from local receipts.
+- **P3 LOCAL_STOP_OBSERVED:** valid owner-only journal contains no historical
+  failure and Controller says STOPPED, representing only one local clean-stop
+  observation; no runtime/production trust can be inferred.
+
+status=SOURCE_ONLY_HOLD, liveness=NOT_PROVEN, activationAllowed=false,
+automaticRestartAllowed=false, releaseAuthority=NOT_ISSUED remain
+invariant in ALL branches. Even P3 is NOT authorization for automatic
+restart, GitHub Check release, D1 mutation, or launching production services.
+
+P0–P3 are deterministic manual investigation ordering hints, not a
+verified operational incident severity or authority decision. An attacker
+with filesystem write rights can still replace the journal and recompute
+digests before a fresh observation. The new tests cover the actual isolated
+Protected Host child process, historical failure persistence, malformed
+journal, symlink/permission violations, Controller state drift/getters,
+pure-read behavior and strict output boundaries. No live environment
+actions, keys, Merge, Deploy or permission mutation were added.

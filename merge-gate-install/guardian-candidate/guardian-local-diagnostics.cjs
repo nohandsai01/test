@@ -419,7 +419,76 @@ function evidenceEnvelope(observation, reason, details = null) {
         latestFailure: shortEvent(rows[failureIndexes[failureIndexes.length - 1]]),
       }));
   }
-  return Object.freeze({ inspect, recentEvents, incidentEvidence });
+  // A single protected snapshot powers this bounded, read-only manual
+  // triage recommendation. Priority indicates WHICH OWNER INVESTIGATION
+  // TO PERFORM FIRST, not verified tampering or permission to reactivate.
+  // All diagnostic fields come from the same stable journal read.
+  function faultTriage() {
+    const { observation, rows } = readSnapshot();
+    let priority, classification, nextAction;
+    let failureCount = 0, firstFailure = null, latestFailure = null;
+    if (!rows) {
+      if (observation.reason === 'GUARDIAN_DIAGNOSTICS_JOURNAL_MISSING' &&
+          observation.processState === 'CREATED') {
+        priority = 'P2';
+        classification = 'NO_LOCAL_BASELINE';
+        nextAction = 'OWNER_VERIFY_FIRST_START_PREREQUISITES';
+      } else {
+        priority = 'P0';
+        classification = 'EVIDENCE_UNVERIFIED';
+        nextAction = 'OWNER_INVESTIGATE_LOCAL_EVIDENCE';
+      }
+    } else {
+      for (const row of rows) {
+        if (row.state === 'FAILED') {
+          failureCount++;
+          if (firstFailure === null) firstFailure = shortEvent(row);
+          latestFailure = shortEvent(row);
+        }
+      }
+      if (failureCount > 0) {
+        // A later clean stop never suppresses a historical incident.
+        priority = 'P1';
+        classification = 'RECORDED_FAILURE';
+        nextAction = 'OWNER_REVIEW_FAULT_HISTORY';
+      } else if (observation.processState === 'FAILED') {
+        priority = 'P1';
+        classification = 'CONTROLLER_FAILED';
+        nextAction = 'OWNER_INVESTIGATE_CONTROLLER_FAILURE';
+      } else if (observation.reason === 'GUARDIAN_DIAGNOSTICS_CLEAN_STOP' &&
+          observation.processState === 'STOPPED') {
+        priority = 'P3';
+        classification = 'LOCAL_STOP_OBSERVED';
+        nextAction = 'NO_LOCAL_FAULT_OBSERVED';
+      } else {
+        priority = 'P2';
+        classification = 'PROCESS_STATE_UNPROVEN';
+        nextAction = 'OWNER_RECONCILE_LIFECYCLE';
+      }
+    }
+    const cleanStop = classification === 'LOCAL_STOP_OBSERVED';
+    return Object.freeze({
+      schemaVersion: 1,
+      kind: 'GUARDIAN_LOCAL_FAULT_TRIAGE_V1',
+      authority: 'LOCAL_UNAUTHENTICATED_OBSERVATION',
+      status: 'SOURCE_ONLY_HOLD',
+      priority, classification, nextAction,
+      sourceReason: observation.reason,
+      processState: observation.processState,
+      liveness: 'NOT_PROVEN',
+      journalEntries: rows ? rows.length : 0,
+      journalSha256: rows ? observation.journalSha256 : null,
+      failureCount,
+      firstFailure,
+      latestFailure,
+      lastTerminal: rows ? observation.lastTerminal : null,
+      manualInterventionRequired: !cleanStop,
+      automaticRestartAllowed: false,
+      activationAllowed: false,
+      releaseAuthority: 'NOT_ISSUED',
+    });
+  }
+  return Object.freeze({ inspect, recentEvents, incidentEvidence, faultTriage });
 }
 
 module.exports = { createGuardianLocalDiagnostics };

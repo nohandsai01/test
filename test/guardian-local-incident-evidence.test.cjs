@@ -85,7 +85,7 @@ test('construction is inert; missing evidence returns non-authorizing UNAVAILABL
     const diagnostic = reader(directory, ctrl);
     assert.equal(statusReads, 0);
     assert.deepEqual(Object.keys(diagnostic).sort(),
-      ['inspect', 'recentEvents', 'incidentEvidence'].sort());
+      ['inspect', 'recentEvents', 'incidentEvidence', 'faultTriage'].sort());
     const packet = diagnostic.incidentEvidence();
     assertHold(packet);
     assert.equal(packet.availability, 'UNAVAILABLE');
@@ -324,7 +324,7 @@ test('Operator can read exact incident but cannot acknowledge, clear, start, sto
       startupTimeoutMs: 1500, shutdownTimeoutMs: 500,
     });
     assert.deepEqual(Object.keys(broken.operator).sort(),
-      ['inspect', 'recentEvents', 'incidentEvidence', 'verifyIncidentEvidence', 'observeLocalContinuity'].sort());
+      ['inspect', 'recentEvents', 'incidentEvidence', 'verifyIncidentEvidence', 'observeLocalContinuity', 'faultTriage'].sort());
     assert.equal(Object.hasOwn(broken.operator, 'acknowledge'), false);
     assert.equal(Object.hasOwn(broken.operator, 'start'), false);
     assert.equal(Object.hasOwn(broken.operator, 'stop'), false);

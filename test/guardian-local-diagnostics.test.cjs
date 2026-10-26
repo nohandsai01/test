@@ -85,7 +85,7 @@ test('construction and import are inert: no file created, no controller start', 
       directory, fileName: 'guardian-test.jsonl', controller: ctrl,
     });
     assert.equal(statusCalls, 0);
-    assert.deepEqual(Object.keys(diag).sort(), ['incidentEvidence', 'inspect', 'recentEvents']);
+    assert.deepEqual(Object.keys(diag).sort(), ['faultTriage', 'incidentEvidence', 'inspect', 'recentEvents']);
     assert.ok(Object.isFrozen(diag));
     assert.equal(fs.existsSync(file(directory)), false);
     const result = diag.inspect();
