@@ -39,7 +39,7 @@ test('owner and Operator have distinct frozen capabilities, construction inert',
     assert.ok(Object.isFrozen(session.owner));
     assert.ok(Object.isFrozen(session.operator));
     assert.deepEqual(Object.keys(session.owner).sort(), ['start', 'status', 'stop']);
-    assert.deepEqual(Object.keys(session.operator).sort(), ['faultTriage', 'incidentEvidence', 'inspect', 'observeLocalContinuity', 'recentEvents', 'verifyIncidentEvidence']);
+    assert.deepEqual(Object.keys(session.operator).sort(), ['faultTriage', 'incidentEvidence', 'inspect', 'observeLocalContinuity', 'probeRuntime', 'recentEvents', 'verifyIncidentEvidence']);
     assert.equal(session.owner.status().state, 'CREATED');
     const before = session.operator.inspect();
     holds(before);

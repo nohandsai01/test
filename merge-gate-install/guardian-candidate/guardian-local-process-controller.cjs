@@ -17,7 +17,7 @@ const path = require('node:path');
 
 const PROTOCOL = 'NOHANDS_GUARDIAN_CHILD_V1';
 const ALLOWED = new Set(['entrypoint', 'cwd', 'startupTimeoutMs',
-  'shutdownTimeoutMs', 'onTerminal']);
+  'shutdownTimeoutMs', 'healthProbeTimeoutMs', 'onTerminal']);
 const MIN_WAIT = 50;
 const MAX_WAIT = 30_000;
 
@@ -73,6 +73,16 @@ function readyFrame(value) {
     value.state === 'RUNNING' && value.activationAllowed === false &&
     value.releaseAuthority === 'NOT_ISSUED';
 }
+function healthFrame(value) {
+  return ownShape(value, ['protocol', 'event', 'challenge', 'healthy',
+    'activationAllowed', 'releaseAuthority']) &&
+    value.protocol === PROTOCOL && value.event === 'HEALTH_RESULT' &&
+    typeof value.challenge === 'string' &&
+    /^[0-9a-f]{32}$/.test(value.challenge) &&
+    typeof value.healthy === 'boolean' &&
+    value.activationAllowed === false &&
+    value.releaseAuthority === 'NOT_ISSUED';
+}
 function terminalFrame(value) {
   return ownShape(value, ['protocol', 'event', 'state', 'hostStopped',
     'activationAllowed', 'releaseAuthority']) &&
@@ -108,7 +118,9 @@ function createGuardianLocalProcessController(options) {
   }
   const startupMs = bounded(options.startupTimeoutMs, 5000);
   const shutdownMs = bounded(options.shutdownTimeoutMs, 3000);
-  if (startupMs === null || shutdownMs === null) {
+  const healthProbeMs = bounded(options.healthProbeTimeoutMs, 3000);
+  if (startupMs === null || shutdownMs === null ||
+      healthProbeMs === null || healthProbeMs > 5000) {
     throw new GuardianChildControllerError('GUARDIAN_CHILD_TIMEOUT_INVALID');
   }
 
@@ -116,6 +128,7 @@ function createGuardianLocalProcessController(options) {
   let child = null, expectedExit = false, gotReady = false, gotTerminal = false;
   let failure = null, notified = false, startPromise = null, stopPromise = null;
   let faultKillTimer = null;
+  let probe = null, expiredChallenge = null, probeBlocked = false;
   let settleStart, rejectStart, settleExit;
   const exited = new Promise((resolve) => { settleExit = resolve; });
   function stateView() {
@@ -126,8 +139,30 @@ function createGuardianLocalProcessController(options) {
       automaticRestartAllowed: false,
     });
   }
+  function probeReceipt(healthy, reason) {
+    return Object.freeze({
+      schemaVersion: 1, status: 'SOURCE_ONLY_HOLD',
+      observation: healthy ? 'LOCAL_CHILD_HEALTH_VERIFIED' : 'NOT_PROVEN',
+      reason,
+      processState: state,
+      liveness: healthy ? 'LOCAL_IPC_AND_LOOPBACK_ONLY' : 'NOT_PROVEN',
+      manualInterventionRequired: true,
+      activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
+      automaticRestartAllowed: false,
+    });
+  }
+  function settleProbe(reason) {
+    if (!probe) return;
+    const current = probe;
+    probe = null;
+    expiredChallenge = current.challenge;
+    probeBlocked = true;
+    clearTimeout(current.timer);
+    current.resolve(probeReceipt(false, reason));
+  }
   function finish(stateName, code) {
     if (notified) return;
+    settleProbe('GUARDIAN_CHILD_PROBE_TERMINATED');
     state = stateName;
     failure = code ?? null;
     notified = true;
@@ -170,6 +205,28 @@ function createGuardianLocalProcessController(options) {
     finish('FAILED', code);
   }
   function onMessage(payload) {
+    // Child health results are valid only for a current owner-generated
+    // random challenge. A delayed reply to one expired request is ignored;
+    // all unsolicited or malformed frames are protocol violations.
+    if (healthFrame(payload)) {
+      if (probe && payload.challenge === probe.challenge &&
+          state === 'RUNNING' && !notified && !expectedExit) {
+        const current = probe;
+        probe = null;
+        clearTimeout(current.timer);
+        if (!payload.healthy) probeBlocked = true;
+        current.resolve(probeReceipt(payload.healthy,
+          payload.healthy ? 'GUARDIAN_CHILD_HEALTH_VERIFIED' :
+            'GUARDIAN_CHILD_HEALTH_UNVERIFIED'));
+        return;
+      }
+      if (expiredChallenge === payload.challenge) {
+        expiredChallenge = null;
+        return;
+      }
+      fail('GUARDIAN_CHILD_PROTOCOL_INVALID');
+      return;
+    }
     // An unknown frame is a protocol failure, not an event to ignore.
     if (!gotReady && readyFrame(payload) && !gotTerminal) {
       gotReady = true;
@@ -263,8 +320,44 @@ function createGuardianLocalProcessController(options) {
     }
   }
 
+  // One bounded, coalesced, read-only active probe. Unlike a PID check,
+  // this verifies a round trip through the child IPC and its loopback
+  // health endpoint. It never grants authorization or signals a process.
+  function probeRuntime() {
+    if (state !== 'RUNNING' || !child || !gotReady ||
+        expectedExit || notified || gotTerminal || probeBlocked) {
+      return Promise.resolve(probeReceipt(false,
+        'GUARDIAN_CHILD_PROBE_UNAVAILABLE'));
+    }
+    if (probe) return probe.promise;
+    const challenge = crypto.randomBytes(16).toString('hex');
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    const current = { challenge, promise, resolve, timer: null };
+    probe = current;
+    current.timer = setTimeout(() => {
+      if (probe === current) {
+        settleProbe('GUARDIAN_CHILD_PROBE_TIMEOUT');
+      }
+    }, healthProbeMs);
+    try {
+      child.send({
+        protocol: PROTOCOL, event: 'HEALTH_PROBE', challenge,
+        activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
+      }, (error) => {
+        if (error && probe === current) {
+          settleProbe('GUARDIAN_CHILD_PROBE_IPC_FAILED');
+        }
+      });
+    } catch (_) {
+      settleProbe('GUARDIAN_CHILD_PROBE_IPC_FAILED');
+    }
+    return promise;
+  }
+
   async function stop() {
     if (stopPromise) return stopPromise;
+    settleProbe('GUARDIAN_CHILD_PROBE_STOPPING');
     if (state === 'CREATED') {
       finish('STOPPED', null);
       return stateView();
@@ -301,7 +394,7 @@ function createGuardianLocalProcessController(options) {
     return stopPromise;
   }
 
-  return Object.freeze({ start, stop, status: stateView });
+  return Object.freeze({ start, stop, status: stateView, probeRuntime });
 }
 
 module.exports = { createGuardianLocalProcessController,

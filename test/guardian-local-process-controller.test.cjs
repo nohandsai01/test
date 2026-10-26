@@ -42,7 +42,7 @@ async function observe(condition, maximum = 600) {
 test('parent construction is inert and exposes no credential or arbitrary child writer', async () => {
   await withScript('normal', async (file) => {
     const { controller, seen } = create(file);
-    assert.deepEqual(Object.keys(controller).sort(), ['start', 'status', 'stop']);
+    assert.deepEqual(Object.keys(controller).sort(), ['probeRuntime', 'start', 'status', 'stop']);
     assert.equal(Object.isFrozen(controller), true);
     assert.equal(controller.status().state, 'CREATED');
     assert.equal(controller.status().pid, null);

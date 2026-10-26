@@ -18,7 +18,8 @@ const { createGuardianLocalEvidenceVerifier } =
   require('./guardian-local-evidence-verifier.cjs');
 
 const FIELDS = new Set(['cwd', 'entrypoint', 'directory', 'fileName',
-  'startupTimeoutMs', 'shutdownTimeoutMs', 'maxJournalBytes']);
+  'startupTimeoutMs', 'shutdownTimeoutMs', 'healthProbeTimeoutMs',
+  'maxJournalBytes']);
 
 function createGuardianLocalOperatorSession(options) {
   if (!options || typeof options !== 'object' ||
@@ -42,6 +43,8 @@ function createGuardianLocalOperatorSession(options) {
       { startupTimeoutMs: options.startupTimeoutMs }),
     ...(options.shutdownTimeoutMs === undefined ? {} :
       { shutdownTimeoutMs: options.shutdownTimeoutMs }),
+    ...(options.healthProbeTimeoutMs === undefined ? {} :
+      { healthProbeTimeoutMs: options.healthProbeTimeoutMs }),
   });
   const diagnostics = createGuardianLocalDiagnostics({
     controller, directory: options.directory,
@@ -71,6 +74,7 @@ function createGuardianLocalOperatorSession(options) {
     verifyIncidentEvidence: (packet) => evidenceVerifier.verify(packet),
     observeLocalContinuity: () => evidenceVerifier.observeContinuity(),
     faultTriage: () => diagnostics.faultTriage(),
+    probeRuntime: () => controller.probeRuntime(),
   });
   return Object.freeze({ owner, operator });
 }

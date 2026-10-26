@@ -12,6 +12,18 @@
 const http = require('node:http');
 
 const PROTOCOL = 'NOHANDS_GUARDIAN_CHILD_V1';
+function probeFrame(value) {
+  return value !== null && typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 5 &&
+    ['protocol', 'event', 'challenge', 'activationAllowed',
+      'releaseAuthority'].every((key) => Object.hasOwn(value, key)) &&
+    value.protocol === PROTOCOL && value.event === 'HEALTH_PROBE' &&
+    typeof value.challenge === 'string' &&
+    /^[0-9a-f]{32}$/.test(value.challenge) &&
+    value.activationAllowed === false &&
+    value.releaseAuthority === 'NOT_ISSUED';
+}
 function childError(code) {
   const e = new Error(code);
   e.code = code;
@@ -120,6 +132,40 @@ function createGuardianChildRuntime({ createRunner, ipc = process,
     });
   }
 
+  let probing = false;
+  async function onProbe(frame) {
+    // IPC is private to the owned parent. Reject unrecognized challenge
+    // shapes without interpreting them as a trusted command.
+    if (!probeFrame(frame)) return;
+    let healthy = false;
+    if (state === 'RUNNING' && !terminalSent && !probing) {
+      probing = true;
+      try {
+        const before = runner.status();
+        if (validateStatus(before)) {
+          await probeLocalHealth(before.loopback.address,
+            before.loopback.port, healthTimeoutMs);
+          const after = runner.status();
+          healthy = !terminalSent && state === 'RUNNING' &&
+            validateStatus(after) &&
+            after.loopback.address === before.loopback.address &&
+            after.loopback.port === before.loopback.port;
+        }
+      } catch (_) {
+        healthy = false;
+      } finally {
+        probing = false;
+      }
+    }
+    // Never send host status or secrets over IPC; only challenge match and
+    // a fresh boolean observation are visible to the parent.
+    void send({
+      protocol: PROTOCOL, event: 'HEALTH_RESULT',
+      challenge: frame.challenge, healthy,
+      activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
+    }).catch(() => {});
+  }
+
   async function start() {
     if (state !== 'CREATED') {
       throw childError('GUARDIAN_CHILD_RUNTIME_STATE_INVALID');
@@ -145,10 +191,16 @@ function createGuardianChildRuntime({ createRunner, ipc = process,
           final.loopback.port !== initial.loopback.port) {
         throw childError('GUARDIAN_CHILD_RUNNER_STATE_DRIFT');
       }
+      // Register before READY: otherwise the parent may issue a probe
+      // between receiving READY and the child's message listener setup.
+      if (typeof ipc.on !== 'function') {
+        throw childError('GUARDIAN_CHILD_IPC_LISTENER_UNAVAILABLE');
+      }
+      state = 'RUNNING';
+      ipc.on('message', onProbe);
       await send({ protocol: PROTOCOL, event: 'READY',
         state: 'RUNNING', activationAllowed: false,
         releaseAuthority: 'NOT_ISSUED' });
-      state = 'RUNNING';
       return Object.freeze({ state, healthVerified: true,
         activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
     } catch (_) {

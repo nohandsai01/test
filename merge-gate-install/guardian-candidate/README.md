@@ -1161,3 +1161,46 @@ Protected Host child process, historical failure persistence, malformed
 journal, symlink/permission violations, Controller state drift/getters,
 pure-read behavior and strict output boundaries. No live environment
 actions, keys, Merge, Deploy or permission mutation were added.
+
+
+## G23 — Bounded on-demand active child health probe (source-only)
+
+Previously the Operator's RUNNING status was only an IPC READY receipt
+captured when the child started; it did not establish whether the child or
+the protected loopback listener continued responding. This batch adds an
+explicit, read-only health challenge, NOT a restart/watchdog/activation path.
+
+The owner-pinned parent Controller now exposes probeRuntime(), and the
+separated Operator facade exposes only the same asynchronous read. The
+parent generates a 128-bit random challenge, sends a fixed-shape
+HEALTH_PROBE to its own ChildProcess IPC channel, and accepts a fixed-shape
+HEALTH_RESULT only with that exact outstanding challenge. The real child
+re-checks its current Protected Host Runner status and the loopback
+/healthz endpoint before returning a boolean. Neither side sends a raw
+Host status, D1 access, PID, credentials, network address, token, exception
+text or Check publication capability through IPC. A verified local probe
+means a recent *local child IPC + loopback roundtrip only*, not OS identity,
+outside-origin reachability, auditable custody or release authorization.
+
+Simultaneous callers coalesce into one request, and Owner config bounds
+the deadline to 50–5000ms (default 3000ms). Unresponsive/malformed/false
+responses cannot be used to claim liveness; a timeout or negative health
+latches further probes into NOT_PROVEN for that controller lifetime. One
+late, valid response to the expired challenge is ignored rather than
+resurrecting trust. Unknown or mismatched protocol frames remain the
+existing fail-closed Controller protocol violations. A stop during an
+in-flight probe resolves the read as NOT_PROVEN; it never delays shutdown.
+Import and construction remain inert; probeRuntime() never calls start(),
+stop(), signal(), reset(), D1 or GitHub. The Owner is still the only side
+allowed to start/stop the child, and probes do not mutate the journal.
+
+A frozen, sanitized result always includes SOURCE_ONLY_HOLD,
+manualInterventionRequired=true, activationAllowed=false,
+automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED. Even the
+positive observation is NOT a launch approval.
+
+Source-only tests use the actual Protected Host child and loopback socket,
+as well as disposable synthetic children for stale, false, forged,
+unsolicited, extra-field, timeout, coalescence, stop-race and configuration
+boundary cases. No production listener, hosted D1, real GitHub App Check
+issuer, credential changes, Merge or Deploy are part of this feature.
