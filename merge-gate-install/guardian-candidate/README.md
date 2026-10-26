@@ -1076,3 +1076,43 @@ or authorization to publish any GitHub Check. A local write-capable
 adversary can replace the journal AND reconstruct both digests. No
 signing keys, credentials, writable operator APIs, Merge, Deploy or
 activation transitions are added.
+
+## G21 — Read-only local append-continuity witness (memory-only, source-only)
+
+The G20 verifier now also exposes `observeContinuity()` using the SAME
+protected journal reader; the separated Operator facade exposes
+`observeLocalContinuity()`. This is not an exporter, release gate, new
+process manager or hosted activation path. Construction/import do no I/O;
+the first explicit observation reads only the pinned, owner-only journal.
+
+The first complete and valid journal read establishes a local untrusted
+baseline. Later observations validate the entire bounded JSONL again and
+require the same device/inode, nondecreasing length and event count, and an
+exact SHA-256 match of the prior known bytes as the prefix of the new file.
+A byte-identical repeat preserves the same step; new validated receipts
+advance the local chain once, with an explicit count of new entries.
+The local chain hash deterministically links prior chain hash, journal
+SHA-256, record count and byte length. It is NOT signed, a durable ledger
+or an external trust anchor. The observer accepts no caller-supplied path,
+baseline digest, restart approval or override.
+
+Once a baseline exists, a valid file with changed historical bytes,
+truncated history, replaced inode, malformed/duplicate receipts or
+owner-permission drift permanently latches the observer into NOT_VERIFIED
+for its lifetime. Before the first baseline, a missing journal returns
+NOT_VERIFIED/HOLD without latching (allowing the first child to create it).
+No Operator method
+can reset or clear it. A new instance yields only a NEW untrusted baseline:
+it cannot claim the old instance's observations or cross-process continuity.
+
+The result is bounded and frozen: local step count, prior/current digest,
+added entry count, internal chain digest and fixed non-authorizing safety
+flags; no PID, raw journal, credentials, file paths or keys.
+`status=SOURCE_ONLY_HOLD`, `manualInterventionRequired=true`,
+`custodyVerified=false`, `externalAnchorVerified=false`,
+`activationAllowed=false`, `automaticRestartAllowed=false`, and
+`releaseAuthority=NOT_ISSUED` are invariant, even on a positive append
+comparison. Relative detection is against the immediately preceding
+in-process observation. It does not establish independent custody, protect
+against a hostile writer before first read or persist an anchor on restart.
+No D1, GitHub App, Check publication or deployment actions are introduced.

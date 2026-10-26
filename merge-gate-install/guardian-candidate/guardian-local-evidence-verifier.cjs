@@ -267,7 +267,8 @@ function createGuardianLocalEvidenceVerifier(options) {
       }
       if (!trustedDirectory()) return null;
       return {
-        rows,
+        rows, bytes,
+        fileIdentity: Object.freeze({ dev: before.dev, ino: before.ino }),
         digest: crypto.createHash('sha256').update(bytes).digest('hex'),
       };
     } catch (_) { return null; }
@@ -290,7 +291,111 @@ function createGuardianLocalEvidenceVerifier(options) {
     return outcome('GUARDIAN_EVIDENCE_LOCAL_SNAPSHOT_MATCH',
       snapshot.rows.length, snapshot.digest);
   }
-  return Object.freeze({ verify });
+  // A per-instance, memory-only append-continuity witness. This is neither
+  // durable custody nor external attestation: a fresh process cannot
+  // reconstruct observations made by an earlier process. The first reading
+  // always establishes an UNTRUSTED baseline; subsequent reads require the
+  // earlier validated bytes to remain an exact prefix of the newer file
+  // on the SAME inode. All errors permanently latch this observer to HOLD.
+  let previous = null;
+  let latchedReason = null;
+
+  function continuityResult(reason, continuity, observed, appendCount,
+    priorDigest = previous?.digest ?? null) {
+    return Object.freeze({
+      schemaVersion: 1,
+      kind: 'GUARDIAN_LOCAL_APPEND_CONTINUITY_V1',
+      status: 'SOURCE_ONLY_HOLD',
+      continuity, reason,
+      observationSequence: previous?.sequence ?? 0,
+      observedEntries: observed?.rows.length ?? 0,
+      addedEntries: appendCount,
+      journalSha256: observed?.digest ?? null,
+      priorJournalSha256: priorDigest,
+      localChainSha256: previous?.chainDigest ?? null,
+      externalAnchorVerified: false,
+      custodyVerified: false,
+      controllerStateVerified: false,
+      liveness: 'NOT_PROVEN',
+      manualInterventionRequired: true,
+      automaticRestartAllowed: false,
+      activationAllowed: false,
+      releaseAuthority: 'NOT_ISSUED',
+    });
+  }
+  function observeContinuity() {
+    if (latchedReason) {
+      return continuityResult(latchedReason, 'NOT_VERIFIED', null, 0);
+    }
+    const snapshot = readLocalSnapshot();
+    if (!snapshot) {
+      // Before ANY baseline there is no historical observation to protect.
+      // For example, a newly constructed owner session has no journal until
+      // its first child has stopped. Stay HOLD, but permit a future FIRST
+      // untrusted baseline. Once a baseline exists, a read fault is sticky.
+      const reason = 'GUARDIAN_CONTINUITY_SOURCE_UNVERIFIED';
+      if (previous) latchedReason = reason;
+      return continuityResult(reason, 'NOT_VERIFIED', null, 0);
+    }
+
+    // No user-controlled cursor or digest is accepted: the anchor is only
+    // the last snapshot this very observer has actually read and validated.
+    if (previous) {
+      if (snapshot.fileIdentity.dev !== previous.dev ||
+          snapshot.fileIdentity.ino !== previous.ino) {
+        latchedReason = 'GUARDIAN_CONTINUITY_FILE_REPLACED';
+      } else if (snapshot.bytes.length < previous.byteLength ||
+          snapshot.rows.length < previous.entryCount) {
+        latchedReason = 'GUARDIAN_CONTINUITY_TRUNCATED';
+      } else if (crypto.createHash('sha256')
+        .update(snapshot.bytes.subarray(0, previous.byteLength))
+        .digest('hex') !== previous.digest ||
+        snapshot.bytes.length === previous.byteLength &&
+          snapshot.rows.length !== previous.entryCount ||
+        snapshot.bytes.length > previous.byteLength &&
+          snapshot.rows.length <= previous.entryCount) {
+        latchedReason = 'GUARDIAN_CONTINUITY_NON_APPEND_CHANGE';
+      }
+      if (latchedReason) {
+        return continuityResult(latchedReason, 'NOT_VERIFIED', null, 0);
+      }
+      if (snapshot.digest === previous.digest) {
+        // Read again, but do not invent a new custody step for an identical
+        // journal snapshot. Unlike a signed ledger, observation count alone
+        // would be meaningless here.
+        return continuityResult('GUARDIAN_CONTINUITY_SNAPSHOT_UNCHANGED',
+          'UNCHANGED_LOCAL_SNAPSHOT', snapshot, 0);
+      }
+    }
+    const priorDigest = previous?.digest ?? null;
+    const appendCount = previous ?
+      snapshot.rows.length - previous.entryCount : 0;
+    const chainDigest = crypto.createHash('sha256').update(JSON.stringify([
+      'GUARDIAN_LOCAL_APPEND_CONTINUITY_V1',
+      previous?.chainDigest ?? null,
+      snapshot.digest,
+      snapshot.rows.length,
+      snapshot.bytes.length,
+    ])).digest('hex');
+    const sequence = (previous?.sequence ?? 0) + 1;
+    const reason = previous ?
+      'GUARDIAN_CONTINUITY_APPEND_OBSERVED' :
+      'GUARDIAN_CONTINUITY_LOCAL_BASELINE';
+    const continuity = previous ?
+      'APPEND_ONLY_RELATIVE_TO_LOCAL_BASELINE' : 'BASELINE_ONLY';
+    previous = Object.freeze({
+      dev: snapshot.fileIdentity.dev,
+      ino: snapshot.fileIdentity.ino,
+      digest: snapshot.digest,
+      byteLength: snapshot.bytes.length,
+      entryCount: snapshot.rows.length,
+      sequence,
+      chainDigest,
+    });
+    return continuityResult(reason, continuity, snapshot, appendCount,
+      priorDigest);
+  }
+  return Object.freeze({ verify, observeContinuity });
 }
 
 module.exports = { createGuardianLocalEvidenceVerifier };

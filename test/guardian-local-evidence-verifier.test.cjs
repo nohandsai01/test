@@ -92,7 +92,7 @@ function reason(result, expected) {
 test('verifier is inert and absent local journal is never treated as evidence', async () => {
   await temporary(async (dir) => {
     const reader = verifier(dir);
-    assert.deepEqual(Object.keys(reader), ['verify']);
+    assert.deepEqual(Object.keys(reader).sort(), ['observeContinuity', 'verify']);
     assert.ok(Object.isFrozen(reader));
     assert.equal(fs.readdirSync(dir).length, 0);
     reason(reader.verify(null), 'GUARDIAN_EVIDENCE_PACKET_INVALID');
@@ -326,7 +326,7 @@ test('operator facade exposes verification only, preserves strict separation fro
     });
     assert.deepEqual(Object.keys(session.operator).sort(), [
       'inspect', 'recentEvents', 'incidentEvidence',
-      'verifyIncidentEvidence',
+      'verifyIncidentEvidence', 'observeLocalContinuity',
     ].sort());
     assert.deepEqual(Object.keys(session.owner).sort(),
       ['start', 'status', 'stop']);

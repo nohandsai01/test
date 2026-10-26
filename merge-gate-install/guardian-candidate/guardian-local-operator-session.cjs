@@ -69,6 +69,7 @@ function createGuardianLocalOperatorSession(options) {
     recentEvents: (options) => diagnostics.recentEvents(options),
     incidentEvidence: (options) => diagnostics.incidentEvidence(options),
     verifyIncidentEvidence: (packet) => evidenceVerifier.verify(packet),
+    observeLocalContinuity: () => evidenceVerifier.observeContinuity(),
   });
   return Object.freeze({ owner, operator });
 }
