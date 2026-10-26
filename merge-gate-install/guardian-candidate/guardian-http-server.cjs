@@ -9,6 +9,8 @@
 const http = require('node:http');
 const { processGuardianDelivery } = require('./guardian-webhook-runtime.cjs');
 const { createGuardianOwnerHttpHandler } = require('./guardian-owner-http.cjs');
+const { createGuardianOperatorHttpHandler } =
+  require('./guardian-operator-http.cjs');
 
 const MAX_BODY_BYTES = 256_000;
 
@@ -49,6 +51,11 @@ function createGuardianHttpServer({ host }) {
   // dependencies, and does not enable webhook writes or launch authority.
   const ownerHandler = host?.enableOwnerOnboardingRoutes === true ?
     createGuardianOwnerHttpHandler({ host: host.ownerOnboarding }) : null;
+  // Read-only operator inspection must be explicitly enabled by an
+  // independently controlled host. Missing auth/token dependencies throw at
+  // setup, never degrade to an unprotected public reconciliation route.
+  const operatorHandler = host?.enableReadOnlyOperatorRoutes === true ?
+    createGuardianOperatorHttpHandler({ host: host.operatorReadOnly }) : null;
   const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/healthz') {
       return sendJson(res, 200, { running: true,
@@ -60,6 +67,15 @@ function createGuardianHttpServer({ host }) {
       } catch (_) {
         return sendJson(res, 503, { status: 'INSTALLATION_HOLD',
           activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
+      }
+    }
+    if (operatorHandler) {
+      try {
+        if (await operatorHandler(req, res)) return;
+      } catch (_) {
+        return sendJson(res, 503, { status: 'SOURCE_ONLY_HOLD',
+          reason: 'GUARDIAN_OPERATOR_UNHANDLED_ERROR',
+          activationAllowed: false });
       }
     }
     if (req.method !== 'POST' || req.url !== '/github/webhook') {

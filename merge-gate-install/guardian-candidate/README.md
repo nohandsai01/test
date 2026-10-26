@@ -548,3 +548,47 @@ production D1**. Its offline tests use a stubbed GitHub transport and a real
 isolated SQLite D1 adapter. Operator authentication, live network proof,
 independent runtime deployment, Check publication and release remain separate
 Founder-gated requirements.
+
+## Owner-authenticated operator HTTP reconciliation (source-only, default OFF)
+
+The isolated route at POST /guardian/operator/check-reconcile is **not**
+enabled by default. A separately authenticated Host may explicitly provide
+enableReadOnlyOperatorRoutes=true and operatorReadOnly configuration to
+createGuardianHttpServer(). Merely importing either module starts no listener
+and exposes no public route.
+
+Required protected operatorReadOnly contracts:
+
+- publicOrigin must be the exact HTTPS origin pinned by the TLS terminator;
+  ownerAccountId, repositoryId, guardianAppId are pinned numeric identities.
+- authenticateOwnerRequest(req) supplies an independently authenticated owner
+  session; verifyCsrf({sessionId,token}) and rateLimiter.allow(...) are mandatory.
+  Never derive owner authority from a caller's JSON body, URL or Origin header.
+- issueReadOnlyToken({sessionId,repositoryId,expectedAppId}) returns a
+  repository-scoped read token with **exact** checks:read, pull_requests:read,
+  metadata:read, and no extra permissions. The Host owns credential custody.
+- conclusionStore.getReservation is the protected read-only D1 adapter.
+  No reserveOnce, Check POST, counter reset or tombstone deletion is exposed.
+
+Request: Content-Type application/json, exact HTTPS Origin and Host, owner CSRF
+header, positive bounded Content-Length <= 4096, and exactly:
+{"schemaVersion":1,"targets":[{"pullNumber":12,"headSha":"<40 lowercase hex>"}]}.
+Targets must be unique, 1–8 pairs. Unexpected keys, duplicate JSON keys,
+unknown origin, oversized/truncated body, missing owner authority, or
+overscoped read token all HOLD. Transfer-Encoding and Content-Encoding are
+rejected for this endpoint.
+
+The read-only response is always SOURCE_ONLY_HOLD with
+automaticRetryAllowed=false, releaseAuthorized=false,
+authoritativeRequiredCheck=NOT_ISSUED. Only non-secret, allowlisted
+observations may be returned. Missing or observed Checks never authorize
+retry/merge/release. No raw token, delivery digest or remote payload is
+returned. Any Host error, partial D1 read, or upstream GitHub error remains
+a HOLD; operator triage cannot publish Checks.
+
+Integration coverage uses a real loopback-only Node HTTP listener, an
+in-memory SQLite instance with the actual Guardian schema, and synthetic
+GitHub snapshots. It tests feature OFF, correct read-only observations,
+multiple targets, owner/CSRF/rate failure, token privilege escalation,
+malformed/duplicated JSON, and absence of live Check egress. This is not
+Cloudflare D1 hosted E2E, App installation or production readiness.
