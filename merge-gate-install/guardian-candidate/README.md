@@ -873,3 +873,41 @@ timeout, rejected frames, duplicate events, and shutdown races. All statuses
 and receipts stay non-authorizing. The tests do not use real keys or any
 production D1/GitHub App. Completion is source-only until separately
 authorized hosted E2E acceptance.
+
+
+## G17 — protected Host child runtime and local durable terminal receipts
+
+The child-side module guardian-child-runtime.cjs binds an OWNER-SUPPLIED
+createRunner factory to an explicit ChildProcess IPC lifecycle. Import and
+construction are inert: the external owner runtime decides which local
+protected configuration factory is trusted. No Host configuration, App private
+key, D1 binding or Check authority is accepted over the parent IPC channel.
+
+The child starts the existing Protected Host process runner in its own
+process, verifies RUNNING/HOLD status with a loopback-only GET /healthz
+(including running=true, feature OFF_OR_SOURCE_ONLY and NOT_ISSUED) under
+a bounded deadline, and only then emits the exact minimal READY frame. A
+missing, malformed, stale or overlarge health result never enables READY.
+An existing Supervisor SIGTERM/SIGINT stop causes the fixed TERMINAL frame
+to be sent over the IPC channel before disconnection. No automatic restart,
+public listener, process.exit or raw secret-bearing status is added.
+
+The independent parent-side guardian-local-receipt-journal.cjs accepts
+only terminal receipt primitives and writes an append-only JSONL line with
+a random event ID and UTC timestamp. The caller pins an owner-only directory
+and a tightly validated journal filename. The file uses O_APPEND, O_NOFOLLOW,
+0600 permissions, bounded total size and synchronous fsync; symlinks, unsafe
+directory permissions, unexpected receipt fields and storage uncertainty
+fail closed. A journal failure makes the parent Controller return FAILED,
+not a falsely clean STOPPED. The journal does not clear D1 reservations or
+record tokens, private keys, raw errors, GitHub payloads or HTTP headers.
+
+The new source-only child fixture builds an OFF-mode real Protected Host
+with an isolated SQLite D1 schema and synthetic RSA/Ed25519 test keys
+entirely within the child. Tests use a separately spawned Node process,
+real IPC, loopback health, graceful signal shutdown and durable parent
+journal across distinct child lifetimes. Negative scenarios cover premature
+exit, falsified ready frames, corrupted health, health timeout, unsafe
+receipts/filesystem permissions and failure to persist terminal evidence.
+These proofs are LOCAL ONLY: they do not replace an approved protected
+runtime image, hosted D1, GitHub App identity/issuer or production launch.
