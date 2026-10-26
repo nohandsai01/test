@@ -132,6 +132,23 @@ test('invalid, repeated, oversized and adversarial targets fail atomically befor
         [item(12), { ...item(13), headSha: 'bad-sha' }],
         [item(12), null], [item(12), ['array']],
         [item(12), { get pullNumber() { throw Error('SECRET-LEAK'); } }],
+        // An owned iterator must not defeat the hard eight-target bound.
+        Object.assign([item(12)], {
+          [Symbol.iterator]: function* () {
+            for (let k = 1; k <= 12; k++) yield item(k);
+          },
+        }),
+        // Array.isArray returns true for Proxies. A changing length trap is
+        // rejected rather than trusting the first observed length.
+        (() => {
+          let reads = 0;
+          return new Proxy([item(12), item(13)], {
+            get(object, key, receiver) {
+              if (key === 'length') return ++reads === 1 ? 2 : 3;
+              return Reflect.get(object, key, receiver);
+            },
+          });
+        })(),
       ];
       for (const targets of bad) {
         const result = await batch(args(targets, conclusionStore));
@@ -197,6 +214,19 @@ test('snapshot identity binds inputs before the first await; later caller mutati
     assert.deepEqual(calls.github.map(x => x.pullNumber), [12, 13]);
     assert.equal(calls.writes, 0);
   });
+});
+
+test('a bounded array is read by index, never by its inherited iterator implementation', async () => {
+  await withBackend(t => row(t), t => snapshot(t, [check(t)]),
+    async ({ reconcileGuardianConclusionBatch: batch, conclusionStore, calls }) => {
+      const targets = Array.from({ length: 8 }, (_, k) => item(k + 1));
+      const result = await batch(args(targets, conclusionStore));
+      noAuthority(result);
+      assert.equal(result.entries.length, 8);
+      assert.deepEqual(calls.d1.map(x => x.pullNumber), [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.equal(calls.github.length, 8);
+      assert.equal(calls.writes, 0);
+    });
 });
 
 test('max eight targets are serialized and never authorize a second Check POST', async () => {
