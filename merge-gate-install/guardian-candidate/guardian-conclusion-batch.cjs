@@ -37,14 +37,19 @@ function invalid() {
   return freezeBatch('RECONCILIATION_BATCH_INPUT_INVALID', []);
 }
 function snapshotTargets(targets) {
-  if (!Array.isArray(targets) || targets.length < 1 ||
-      targets.length > MAX_BATCH_TARGETS) return null;
+  if (!Array.isArray(targets)) return null;
+  // A hostile array can override Symbol.iterator to yield unbounded extra
+  // targets regardless of .length. NEVER use for...of on caller arrays.
+  if (Object.hasOwn(targets, Symbol.iterator)) return null;
+  const count = targets.length;
+  if (!Number.isSafeInteger(count) || count < 1 ||
+      count > MAX_BATCH_TARGETS) return null;
   const keys = new Set(), pinned = [];
-  for (const target of targets) {
+  for (let index = 0; index < count; index++) {
+    const target = targets[index];
     if (!target || typeof target !== 'object' || Array.isArray(target)) return null;
-    // Read each property exactly once, before the first asynchronous read.
-    // Caller mutation while D1/GitHub requests are pending cannot change
-    // the identity in a later report item.
+    // Snapshot identities before any asynchronous read; callers cannot
+    // redirect later D1/GitHub lookups by mutating their objects or array.
     const pullNumber = target.pullNumber, headSha = target.headSha;
     if (!positive(pullNumber) || typeof headSha !== 'string' ||
         !SHA.test(headSha)) return null;
@@ -53,6 +58,9 @@ function snapshotTargets(targets) {
     keys.add(key);
     pinned.push(Object.freeze({ pullNumber, headSha }));
   }
+  // Catch unstable Proxy length traps. Even a malicious Proxy returning the
+  // original length twice can never exceed the fixed, indexed count above.
+  if (targets.length !== count) return null;
   return Object.freeze(pinned);
 }
 function safeEntry(target, evidence) {
