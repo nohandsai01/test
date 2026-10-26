@@ -768,3 +768,48 @@ real schema (GitHub stubbed, `https.request` blocked, synthetic keys):
 Not covered: Cloudflare D1 hosted E2E, a real GitHub App installation, real
 keys or Checks, TLS termination, signal handling/process supervision and any
 production activation. Independent QA and security review remain required.
+
+## G15 — isolated process supervision, bounded OS signal handling (source-only)
+
+guardian-process-supervisor.cjs provides an **inert** process-manager adapter
+for a protected Guardian host that already exposes start(), stop() and
+status(). Importing or constructing it does not start a listener, install
+OS signal handlers, register credentials, start a cloud App or change D1.
+
+A separately owner-controlled process manager calls
+createGuardianProcessSupervisor({host, onTerminal, signalSource?, stopDeadlineMs?})
+with an independently configured createGuardianProtectedHost instance. The
+owner explicitly calls await supervisor.start(). Only this explicit call
+registers SIGTERM/SIGINT handlers, before asynchronous host start. No signal
+is handled implicitly on import. The default signal source is Node's process,
+but an injected emitter supports offline deterministic tests.
+
+- Signals during startup queue a stop after startup settles. Simultaneous
+  signals and a manual stop coalesce into **one** host.stop() attempt.
+- Shutdown is bounded (default 15 seconds, configurable 50–30000 ms). The
+  existing Protected Host performs its own graceful-drain/forced socket close;
+  this supervisor only bounds the outer stop acknowledgement. A timed-out or
+  failed stop returns FAILED and an immutable failure receipt. It must never
+  claim the host stopped merely because the deadline elapsed.
+- Startup errors attempt a bounded cleanup, including partial listeners. Any
+  uncertainty is FAILED, never RUNNING. Signal listeners are removed after
+  successful or failed termination; cleanup errors cannot be silently PASS.
+- The owner-required synchronous onTerminal callback receives a single
+  minimal frozen {state, reason, errorCode, hostStopped, activationAllowed,
+  releaseAuthority} receipt. A missing or throwing callback is a configuration
+  or terminal failure. **The external process manager** decides whether and
+  how to kill/restart the process; this module never calls process.exit/kill,
+  never restarts automatically, and never clears a D1 tombstone.
+- status() and terminal receipts always declare activationAllowed=false
+  and releaseAuthority=NOT_ISSUED. No raw Host keys, policy, tokens, request
+  headers, D1 credentials or reservation contents appear in them.
+
+Tests use synthetic signal emitters, bounded fake hosts, and a real loopback
+listener. Child-process OS signal tests use only local Node processes,
+no GitHub egress. These establish source/local OS-lifecycle semantics,
+**not** live hosted D1, real Check App issuance, TLS/process manager deployment,
+native GitHub Approval, or production readiness.
+
+All prior Founder-only Merge, Deploy, App/Key, Ruleset, Check and production
+actions remain prohibited. The feature is not integrated into a live launcher
+and its activation remains HOLD.
