@@ -649,3 +649,63 @@ injections exercise stalled owner auth, CSRF, rate limiting, token issuance,
 GitHub reads, D1 reads, request-body upload, and late backend success.
 All remain strictly operator-only and source-only; no Check POST, database
 delete, deployed listener, GitHub App activation or production trust claim.
+
+
+## Protected host bootstrap and runtime adapter (isolated, default HOLD)
+
+`guardian-host-bootstrap.cjs` and `guardian-host-runtime.cjs` compose the
+existing `createGuardianHttpServer` and `createGuardianD1Stores` into one
+lifecycle-managed host. They do **not** re-implement webhook, operator,
+owner OAuth, Check reconciliation or signature logic. Importing either module
+opens no port, reads no environment variable and makes no network call.
+
+`createGuardianProtectedHost(config)` validates synchronously and throws a
+code-only `GuardianHostConfigError` (never echoing secrets) for any of:
+
+- unknown keys at any level (a misspelled switch never silently defaults);
+- a non-loopback bind address. Only `127.0.0.1` / `::1` are accepted; TLS
+  termination, Host pinning and public exposure stay with a separate terminator;
+- missing D1 binding, short webhook secret, non-positive numeric identities,
+  or a GitHub App key that is not RSA >= 2048 bits;
+- a policy authority whose hostname the runtime would refuse, whose key is not
+  Ed25519, or whose pinned SPKI SHA-256 does not match the configured key;
+- `checkWrites` other than exactly `{mode:'OFF'}`,
+  `{mode:'FAILURE_ONLY', founderGrant:'EXPLICIT_FAILURE_ONLY'}` or
+  `{mode:'FULL', founderGrant:'EXPLICIT_FULL_CHECK_WRITES'}`;
+- owner/operator sections lacking any authentication, CSRF, rate-limit or
+  read-token dependency, or using a non-HTTPS origin.
+
+All App, owner, repository and store identities are injected once from the
+pinned `githubApp` section and the D1 binding. Callers cannot hand a
+different store or ID to one sub-handler. The operator route receives only
+`conclusionStore.getReservation`, with no D1 mutation.
+
+Lifecycle:
+
+- `start()` runs a read-only schema presence probe on all five Guardian tables
+  (no create, migrate or write), builds the existing handlers, and listens.
+  A missing table, unreadable D1 or handler setup error refuses start and
+  leaves no listener.
+- Every injected D1 call and owner/operator authority call is bounded by
+  `dependencyTimeoutMs` (50–30000, default 5000) and fenced to one host
+  generation. A timeout or a result that arrives after `stop()` is a
+  rejection, which the existing stores and handlers already treat as HOLD.
+- `stop()` fences the generation first, then closes the listener, closes idle
+  connections and destroys the remaining ones after `drainTimeoutMs`
+  (0–60000, default 5000). It is idempotent.
+- `restart()` is `stop()` followed by `start()` against the same durable D1.
+  Delivery tombstones and `(repository_id, pull_number, head_sha)` conclusion
+  reservations survive, so a restart cannot republish a Check for that head,
+  including after an uncertain POST.
+
+Residual limitation: a request that has already passed its final D1
+reservation and is between the fresh PR GET and the Check POST when `stop()`
+is called can still complete that single, already-reserved POST. This is
+still at most once per head; it is not a second publication.
+
+`test/guardian-protected-host-integration.test.cjs` exercises this on a
+loopback listener with a file-backed temporary SQLite D1 carrying the real
+schema, a stubbed GitHub transport, ephemeral in-process keys and an egress
+guard that fails the run on any real `https`/`fetch` attempt. It is not a
+Cloudflare D1, GitHub App, TLS terminator or production readiness proof, and
+grants no activation, release or Check-publication authority.
