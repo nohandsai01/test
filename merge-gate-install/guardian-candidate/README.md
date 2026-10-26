@@ -531,7 +531,8 @@ performed in G10.
 installationToken, conclusionStore, targets })`. The protected operator host
 (not a public PR/webhook input) supplies a repository-scoped read token and the
 verified D1 `conclusionStore.getReservation` adapter. `targets` contains 1–8
-unique `{ pullNumber, headSha }` pairs. Every identity is pinned before reads;
+unique `{ pullNumber, headSha }` pairs. Caller-defined array iterators and
+unstable lengths fail closed; enumeration uses a fixed index bound. Every identity is pinned before reads;
 invalid or repeated targets reject the **entire batch without D1/GitHub I/O**.
 
 The batch sequentially performs each existing authenticated, read-only single
