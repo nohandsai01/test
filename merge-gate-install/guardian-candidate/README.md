@@ -955,3 +955,36 @@ bytes/mtime, symlinks, partial JSON, ownership or quota failures, and
 untrusted status or input. It is not hosted Cloudflare D1 E2E, real
 GitHub App Check issuance, native non-author GitHub Approval or production
 readiness. The active Founder launch HOLD remains binding.
+
+
+## G18 — Read-only Operator event window and incident evidence (source-only)
+
+The local diagnostic reader now exposes recentEvents({ limit, cursor }) through
+the isolated Operator capability. The owner-only start/stop/status capability
+is unchanged. Default limit is 10, maximum is 50, and queries always validate
+the entire bounded JSONL journal (including duplicate JSON keys, event IDs,
+record schema, file owner/permissions, symlinks, file changes and controller
+state). They never create a file, clear errors, spawn a child or write to D1.
+
+Pages return the newest events first and only the four allowlisted fields
+eventId, timestamp, state and errorCode. An opaque-in-purpose, explicitly
+nonsecret cursor contains the observed journal SHA-256 and preceding row
+offset. Any changed journal invalidates the cursor and returns no events;
+there is no cached page, hidden pagination state or implicit restart. Cursor
+hashes identify the local observed bytes only and are NOT authentication,
+integrity attestation, authorization, liveness proof or release tokens.
+
+Each validated page includes an immutable incident summary containing
+failureCount, firstFailure, latestFailure and manualInterventionRequired.
+Any historical FAILED receipt continues to require manual intervention even
+after a later successful STOPPED receipt. There is no fault acknowledgment,
+reset, erase, override, approval or release endpoint; source remains HOLD.
+
+Both inspect() and recentEvents() use the same journal/controller validation
+snapshot. On corrupt, missing, truncated, swapped or unauthorized files, or
+an unverified controller, the event page carries zero rows and fail-closed
+SOURCE_ONLY_HOLD. Query input failures produce fixed nonsecret error codes.
+
+This is a local observer for an already owned child lifecycle only. It does
+not provide operator authentication, a daemon interface, a durable custody
+ledger, a trust anchor or production acceptance.

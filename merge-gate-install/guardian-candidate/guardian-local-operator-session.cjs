@@ -57,6 +57,7 @@ function createGuardianLocalOperatorSession(options) {
   });
   const operator = Object.freeze({
     inspect: () => diagnostics.inspect(),
+    recentEvents: (options) => diagnostics.recentEvents(options),
   });
   return Object.freeze({ owner, operator });
 }
