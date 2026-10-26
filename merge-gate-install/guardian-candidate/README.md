@@ -911,3 +911,47 @@ exit, falsified ready frames, corrupted health, health timeout, unsafe
 receipts/filesystem permissions and failure to persist terminal evidence.
 These proofs are LOCAL ONLY: they do not replace an approved protected
 runtime image, hosted D1, GitHub App identity/issuer or production launch.
+
+
+## G18 — local Guardian operator diagnostics and manual HOLD triage
+
+guardian-local-diagnostics.cjs is a separate, read-only observation adapter
+for an owned Guardian ChildProcess Controller and an append-only terminal
+receipt journal. It is inert until inspect() is explicitly called. All
+results keep status=SOURCE_ONLY_HOLD, liveness=NOT_PROVEN,
+activationAllowed=false, releaseAuthority=NOT_ISSUED and
+automaticRestartAllowed=false. PID presence or a previously clean STOPPED
+record never constitutes proof that a process is alive or the hosted
+Guardian Check issuer is safe.
+
+The adapter pins an owner-only evidence directory and a fixed, allowlisted
+journal filename; reads the journal with O_NOFOLLOW and bounded bytes;
+verifies file ownership, size, permissions, inode/mtime/ctime stability,
+complete UTF-8/JSONL records, unique event IDs, strict receipt keys and
+the controller's before/after state. It never writes, truncates, rotates or
+repairs the journal. Read errors, missing or partial files, duplicated,
+unknown or malformed entries, changed files and controller drift all
+require manual intervention.
+
+Each report exposes only non-secret fields: sanitized process state,
+last terminal state/error code/UTC timestamp/event ID, journal entry count,
+SHA256 of observed bytes, and manualInterventionRequired. A historical
+FAILED receipt remains a manual-review HOLD even after a later STOPPED
+receipt; a later apparently clean process cannot silently clear an old
+fault. CLEAN_STOP is solely an observation of a stopped local controller
+and a valid journal, not a release or reactivation approval.
+
+guardian-local-operator-session.cjs composes existing Controller, receipt
+Journal and read-only Diagnostics but returns **separate frozen owner and
+operator capabilities**: owner can start/stop/status; operator can inspect
+only. The Operator object has no start, stop, recovery, token, D1 write,
+Check publishing or journal reset method. It is not an HTTP endpoint,
+not a live service and not accessible outside the local owner boundary.
+
+The new offline tests exercise real Protected Host child start/stop,
+durable failure receipts across separate process instances, manually
+persistent faults, repeated read-only inspections without changing file
+bytes/mtime, symlinks, partial JSON, ownership or quota failures, and
+untrusted status or input. It is not hosted Cloudflare D1 E2E, real
+GitHub App Check issuance, native non-author GitHub Approval or production
+readiness. The active Founder launch HOLD remains binding.
