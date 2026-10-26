@@ -622,3 +622,30 @@ The local negative scenarios include hostile report fields and accessors,
 mismatched target identities, session revocation during reads, expired and
 overprivileged read tokens, and fail-closed sanitized HTTP responses.
 No release authority is ever returned by this endpoint.
+
+
+### Bounded operator recovery under stalled connections
+
+The protected operator route now uses **one monotonic, end-to-end request
+deadline** covering owner authentication, CSRF/rate checks, complete body,
+short-lived read-token issuance, sequential D1/GitHub reconciliation, and the
+final owner reauthentication. Default deadline is 8 seconds; the independent
+Host may set requestTimeoutMs from 50 to 10000 milliseconds. Invalid budgets
+fail at route construction, not at runtime. Every exceeded deadline returns
+GUARDIAN_OPERATOR_READ_DEADLINE_EXCEEDED under SOURCE_ONLY_HOLD when the
+client is still connected. No observation or retry/release authority is sent.
+
+A cooperative Host dependency receives an AbortSignal; the signal is aborted
+on a client disconnect or deadline. The HTTP request-body reader detaches all
+stream listeners after completion/failure. A provider ignoring cancellation
+may finish its **read** later, but the gateway never publishes that result or
+sends another response. Production adapters must respect cancellation and
+separately bound their own transport/read operations; a timeout wrapper
+alone does not interrupt noncooperative network I/O.
+
+Two independent local HTTP Host instances can inspect the same real temporary
+SQLite reservation concurrently without changing the tombstone. Fault
+injections exercise stalled owner auth, CSRF, rate limiting, token issuance,
+GitHub reads, D1 reads, request-body upload, and late backend success.
+All remain strictly operator-only and source-only; no Check POST, database
+delete, deployed listener, GitHub App activation or production trust claim.
