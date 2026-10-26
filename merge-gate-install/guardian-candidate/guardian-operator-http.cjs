@@ -14,6 +14,13 @@ const ROUTE = '/guardian/operator/check-reconcile';
 const MAX_BODY_BYTES = 4096;
 const SHA = /^[a-f0-9]{40}$/;
 const SESSION = /^[A-Za-z0-9_-]{16,256}$/;
+const REASON = /^RECONCILIATION_[A-Z0-9_]{1,100}$/;
+const OBSERVATION_FIELDS = Object.freeze(new Set([
+  'pullNumber', 'headSha', 'status', 'reason',
+  'reservationObserved', 'remoteReadPerformed',
+  'observedMatchingNameCount', 'observedCheckRunId',
+  'observedConclusion',
+]));
 
 function validOrigin(raw) {
   if (typeof raw !== 'string' || raw.length > 256) return false;
@@ -30,6 +37,75 @@ function ownShape(o, fields) {
   return record(o) && Object.keys(o).length === fields.length &&
     fields.every((field) => Object.hasOwn(o, field));
 }
+function plainData(value) {
+  if (!record(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    return null;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((item) => !Object.hasOwn(item, 'value'))) {
+    return null;
+  }
+  return Object.fromEntries(Object.entries(descriptors).map(([key, d]) =>
+    [key, d.value]));
+}
+
+/**
+ * Treat all batch observations as untrusted output at the HTTP boundary.
+ * Copy only concrete primitives, forbid additional keys and enforce the exact
+ * requested target ordering. Never relay raw provider objects or secrets.
+ */
+function boundedObservations(report, targets) {
+  const root = plainData(report);
+  if (!root || root.schemaVersion !== 1 ||
+      root.status !== 'SOURCE_ONLY_HOLD' ||
+      root.reason !== 'RECONCILIATION_BATCH_OBSERVATIONS_ONLY' ||
+      root.trusted !== false || root.activationAllowed !== false ||
+      root.releaseAuthorized !== false ||
+      root.automaticRetryAllowed !== false ||
+      root.authoritativeRequiredCheck !== 'NOT_ISSUED' ||
+      root.evaluatedTargetCount !== targets.length ||
+      !Array.isArray(root.entries) || root.entries.length !== targets.length) {
+    return null;
+  }
+  const output = [];
+  for (let i = 0; i < targets.length; i++) {
+    const row = plainData(root.entries[i]);
+    if (!row || Object.keys(row).some((k) => !OBSERVATION_FIELDS.has(k)) ||
+        row.pullNumber !== targets[i].pullNumber ||
+        row.headSha !== targets[i].headSha ||
+        row.status !== 'SOURCE_ONLY_HOLD' ||
+        typeof row.reason !== 'string' || !REASON.test(row.reason)) {
+      return null;
+    }
+    const entry = {
+      pullNumber: row.pullNumber, headSha: row.headSha,
+      status: 'SOURCE_ONLY_HOLD', reason: row.reason,
+    };
+    for (const field of ['reservationObserved', 'remoteReadPerformed']) {
+      if (Object.hasOwn(row, field)) {
+        if (typeof row[field] !== 'boolean') return null;
+        entry[field] = row[field];
+      }
+    }
+    if (Object.hasOwn(row, 'observedMatchingNameCount')) {
+      if (!Number.isSafeInteger(row.observedMatchingNameCount) ||
+          row.observedMatchingNameCount < 0 ||
+          row.observedMatchingNameCount > 1000) return null;
+      entry.observedMatchingNameCount = row.observedMatchingNameCount;
+    }
+    if (Object.hasOwn(row, 'observedCheckRunId')) {
+      if (!integer(row.observedCheckRunId)) return null;
+      entry.observedCheckRunId = row.observedCheckRunId;
+    }
+    if (Object.hasOwn(row, 'observedConclusion')) {
+      if (!['success', 'failure'].includes(row.observedConclusion)) return null;
+      entry.observedConclusion = row.observedConclusion;
+    }
+    output.push(Object.freeze(entry));
+  }
+  return Object.freeze(output);
+}
+
 function boundedTargets(value) {
   if (!Array.isArray(value) || value.length < 1 ||
       value.length > MAX_BATCH_TARGETS) return null;
@@ -163,37 +239,57 @@ function createGuardianOperatorHttpHandler({ host }) {
       sessionId: session.sessionId, repositoryId: host.repositoryId,
       expectedAppId: host.guardianAppId,
     }); } catch (_) { return invalid(503, 'GUARDIAN_OPERATOR_TOKEN_UNVERIFIED'); }
-    if (!record(token) || token.repositoryId !== host.repositoryId ||
-        token.appId !== host.guardianAppId ||
-        typeof token.value !== 'string' || token.value.length < 16 ||
-        token.value.length > 4096 || !/^[\x21-\x7e]+$/.test(token.value) ||
-        !ownShape(token.permissions, ['checks', 'pull_requests', 'metadata']) ||
-        token.permissions.checks !== 'read' ||
-        token.permissions.pull_requests !== 'read' ||
-        token.permissions.metadata !== 'read') {
+    const pinnedToken = plainData(token);
+    const permissions = pinnedToken && plainData(pinnedToken.permissions);
+    const expiry = pinnedToken && pinnedToken.expiresAt;
+    const expiresAt = typeof expiry === 'string' ? Date.parse(expiry) : NaN;
+    if (!pinnedToken || pinnedToken.repositoryId !== host.repositoryId ||
+        pinnedToken.appId !== host.guardianAppId ||
+        typeof pinnedToken.value !== 'string' || pinnedToken.value.length < 16 ||
+        pinnedToken.value.length > 4096 ||
+        !/^[\x21-\x7e]+$/.test(pinnedToken.value) ||
+        !Number.isFinite(expiresAt) ||
+        expiresAt <= Date.now() + 60_000 ||
+        expiresAt > Date.now() + 3_600_000 ||
+        !permissions ||
+        !ownShape(permissions, ['checks', 'pull_requests', 'metadata']) ||
+        permissions.checks !== 'read' ||
+        permissions.pull_requests !== 'read' ||
+        permissions.metadata !== 'read') {
       return invalid(503, 'GUARDIAN_OPERATOR_TOKEN_UNVERIFIED');
     }
+    if (req.aborted || !req.complete || res.destroyed || res.writableEnded) return true;
 
     let report;
     try {
       report = await reconcileGuardianConclusionBatch({
         repositoryId: host.repositoryId, expectedAppId: host.guardianAppId,
-        installationToken: token.value,
+        installationToken: pinnedToken.value,
         conclusionStore: host.conclusionStore,
         targets,
       });
     } catch (_) { return invalid(503, 'GUARDIAN_OPERATOR_READ_FAILED'); }
-    if (!record(report) || report.status !== 'SOURCE_ONLY_HOLD' ||
-        report.trusted !== false || report.activationAllowed !== false ||
-        report.releaseAuthorized !== false ||
-        report.automaticRetryAllowed !== false ||
-        report.authoritativeRequiredCheck !== 'NOT_ISSUED' ||
-        report.evaluatedTargetCount !== targets.length ||
-        !Array.isArray(report.entries) || report.entries.length !== targets.length) {
+    let observations;
+    try { observations = boundedObservations(report, targets); }
+    catch (_) { observations = null; }
+    if (!observations) {
       return invalid(503, 'GUARDIAN_OPERATOR_RESULT_UNVERIFIED');
     }
-    // The batch has already removed secrets and restricted output metadata.
-    return reply(res, 200, 'GUARDIAN_OPERATOR_OBSERVATIONS_ONLY', report.entries);
+    if (req.aborted || !req.complete || res.destroyed || res.writableEnded) return true;
+    // Host authentication can expire during multi-target GitHub reads.
+    // Re-read the protected session before returning sensitive observations.
+    let currentOwner;
+    try { currentOwner = await host.authenticateOwnerRequest(req); }
+    catch (_) { return invalid(401, 'GUARDIAN_OPERATOR_AUTH_REVOKED'); }
+    if (!record(currentOwner) || currentOwner.ownerAccountId !== host.ownerAccountId ||
+        currentOwner.sessionId !== session.sessionId) {
+      return invalid(401, 'GUARDIAN_OPERATOR_AUTH_REVOKED');
+    }
+    if (req.aborted || !req.complete || res.destroyed || res.writableEnded) return true;
+    if (Date.now() >= expiresAt) {
+      return invalid(503, 'GUARDIAN_OPERATOR_TOKEN_EXPIRED_DURING_READ');
+    }
+    return reply(res, 200, 'GUARDIAN_OPERATOR_OBSERVATIONS_ONLY', observations);
   };
 }
 

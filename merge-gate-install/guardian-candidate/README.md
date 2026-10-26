@@ -592,3 +592,33 @@ GitHub snapshots. It tests feature OFF, correct read-only observations,
 multiple targets, owner/CSRF/rate failure, token privilege escalation,
 malformed/duplicated JSON, and absence of live Check egress. This is not
 Cloudflare D1 hosted E2E, App installation or production readiness.
+
+
+### Hardened operator release boundary (same source-only milestone)
+
+After each bounded read-only batch, the operator gateway independently
+rebuilds the response from a strict allowlist of primitive fields; it does
+not forward downstream objects or extra payload keys. It verifies each
+observation's pull number, exact head, HOLD status, reason syntax, and optional
+boolean/count/check metadata. Accessor-based output objects and malformed
+claims fail closed. No provider secrets, raw response objects, check tokens,
+or authority fields may be reflected.
+
+The protected Host must supply a narrowly scoped checks:read token with
+explicit expiresAt, repository ID, Guardian App ID and exactly read-only
+checks, pull_requests, metadata permissions. The token must remain valid for
+more than one minute when issued, and no more than one hour. It is snapshotted
+before asynchronous reconciliation. A token expired during the read produces
+a HOLD, never an issued Check or released observation.
+
+The gateway independently reauthenticates the same owner session after the
+batch completes, before returning any observations; revoked or changed
+sessions reject the response. This is a source-only session freshness check,
+not a proof of future revocation response by the Host. Client-disconnected
+responses are not sent. A complete batch response still does not grant a
+Check write, release, automatic retry or permission to clear D1 tombstones.
+
+The local negative scenarios include hostile report fields and accessors,
+mismatched target identities, session revocation during reads, expired and
+overprivileged read tokens, and fail-closed sanitized HTTP responses.
+No release authority is ever returned by this endpoint.

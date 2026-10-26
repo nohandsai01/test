@@ -79,13 +79,15 @@ function makeHost(store, counters, overrides = {}) {
     issueReadOnlyToken: async () => {
       counters.tokens++;
       return { repositoryId: 88, appId: 999, value: TOKEN,
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
         permissions: { checks: 'read', pull_requests: 'read', metadata: 'read' } };
     },
     ...overrides,
   };
   return { enableReadOnlyOperatorRoutes: true, operatorReadOnly };
 }
-async function withHost({ enabled = true, overrideOperator = {} } = {}, run) {
+async function withHost({ enabled = true, overrideOperator = {},
+  batchOverride = null } = {}, run) {
   const original = require(COLLECTOR).collectAuthenticatedGithubSnapshot;
   const calls = { remote: 0, auth: 0, csrf: 0, rate: 0, tokens: 0 };
   require(COLLECTOR).collectAuthenticatedGithubSnapshot = async (input) => {
@@ -95,6 +97,9 @@ async function withHost({ enabled = true, overrideOperator = {} } = {}, run) {
     return offlineSnapshot(input);
   };
   for (const key of [SINGLE, BATCH, OPERATOR, SERVER]) delete require.cache[key];
+  const batchModule = require(BATCH);
+  const originalBatch = batchModule.reconcileGuardianConclusionBatch;
+  if (batchOverride) batchModule.reconcileGuardianConclusionBatch = batchOverride;
   const { createGuardianHttpServer } = require(SERVER);
   const { db, store } = fixture();
   const host = enabled ? makeHost(store, calls, overrideOperator) : {};
@@ -106,6 +111,7 @@ async function withHost({ enabled = true, overrideOperator = {} } = {}, run) {
     await new Promise((resolve) => server.close(resolve));
     db.close();
     require(COLLECTOR).collectAuthenticatedGithubSnapshot = original;
+    batchModule.reconcileGuardianConclusionBatch = originalBatch;
     for (const key of [SINGLE, BATCH, OPERATOR, SERVER]) delete require.cache[key];
   }
 }
@@ -263,12 +269,21 @@ test('owner auth and rate failures refuse all token and GitHub reads', async () 
 test('write-capable, wrong-repo or overscoped read token is never used', async () => {
   const responses = [
     { repositoryId: 88, appId: 999, value: TOKEN,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
       permissions: { checks: 'write', pull_requests: 'read', metadata: 'read' } },
     { repositoryId: 89, appId: 999, value: TOKEN,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
       permissions: { checks: 'read', pull_requests: 'read', metadata: 'read' } },
     { repositoryId: 88, appId: 999, value: TOKEN,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
       permissions: { checks: 'read', pull_requests: 'read', metadata: 'read',
         contents: 'write' } },
+    { repositoryId: 88, appId: 999, value: TOKEN,
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      permissions: { checks: 'read', pull_requests: 'read', metadata: 'read' } },
+    { repositoryId: 88, appId: 999, value: TOKEN,
+      expiresAt: new Date(Date.now() + 3_600_000 + 120_000).toISOString(),
+      permissions: { checks: 'read', pull_requests: 'read', metadata: 'read' } },
   ];
   for (const returned of responses) {
     await withHost({ overrideOperator: {
@@ -287,4 +302,146 @@ test('missing protected host dependencies cannot enable reconciliation route', (
   assert.throws(() => createGuardianHttpServer({
     host: { enableReadOnlyOperatorRoutes: true, operatorReadOnly: {} },
   }), /GUARDIAN_OPERATOR_TRUST_CONFIGURATION_MISSING/);
+});
+
+
+function forgedBatch(entries, extra = {}) {
+  return {
+    schemaVersion: 1,
+    status: 'SOURCE_ONLY_HOLD',
+    reason: 'RECONCILIATION_BATCH_OBSERVATIONS_ONLY',
+    trusted: false,
+    activationAllowed: false,
+    releaseAuthorized: false,
+    automaticRetryAllowed: false,
+    authoritativeRequiredCheck: 'NOT_ISSUED',
+    evaluatedTargetCount: entries.length,
+    entries,
+    ...extra,
+  };
+}
+const cleanObservation = () => ({
+  pullNumber: 12, headSha: SHA, status: 'SOURCE_ONLY_HOLD',
+  reason: 'RECONCILIATION_CHECK_OBSERVED_ONLY',
+  observedCheckRunId: 501, observedConclusion: 'failure',
+  reservationObserved: true,
+});
+
+test('forged batch output or wrong target never leaks into HTTP reply', async () => {
+  const poisoned = [
+    forgedBatch([{ ...cleanObservation(), token: 'EXFILTRATE' }]),
+    forgedBatch([{ ...cleanObservation(), trusted: true }]),
+    forgedBatch([{ ...cleanObservation(), headSha: OTHER_SHA }]),
+    forgedBatch([{ ...cleanObservation(), pullNumber: 13 }]),
+    forgedBatch([{ ...cleanObservation(), reason: 'RECONCILIATION_OK\nSECRET' }]),
+    forgedBatch([{ ...cleanObservation(), observedCheckRunId: '501' }]),
+    forgedBatch([{ ...cleanObservation(), observedConclusion: 'neutral' }]),
+    forgedBatch([cleanObservation()], { trusted: true }),
+    forgedBatch([cleanObservation()], { reason: 'TRUSTED_APPROVAL' }),
+    forgedBatch([cleanObservation()], { evaluatedTargetCount: 2 }),
+  ];
+  for (const report of poisoned) {
+    await withHost({ batchOverride: async () => report },
+      async ({ port, calls }) => {
+        const result = await send(port);
+        assert.equal(result.status, 503);
+        assert.equal(result.body.reason, 'GUARDIAN_OPERATOR_RESULT_UNVERIFIED');
+        assert.equal(result.body.activationAllowed, false);
+        assert.equal(JSON.stringify(result.body).includes('EXFILTRATE'), false);
+        assert.equal(calls.tokens, 1);
+        assert.equal(calls.remote, 0);
+      });
+  }
+});
+
+test('batch result accessors and invalid optional fields fail without reading secrets', async () => {
+  const entry = cleanObservation();
+  Object.defineProperty(entry, 'reason', {
+    enumerable: true, get() { throw new Error('synthetic secret getter'); },
+  });
+  for (const report of [
+    forgedBatch([entry]),
+    forgedBatch([{ ...cleanObservation(), reservationObserved: 'true' }]),
+    forgedBatch([{ ...cleanObservation(), observedMatchingNameCount: -1 }]),
+    forgedBatch([{ ...cleanObservation(), observedCheckRunId: 0 }]),
+  ]) {
+    await withHost({ batchOverride: async () => report },
+      async ({ port, calls }) => {
+        const res = await send(port);
+        assert.equal(res.status, 503);
+        assert.equal(res.body.activationAllowed, false);
+        assert.equal(JSON.stringify(res.body).includes('synthetic secret'), false);
+        assert.equal(calls.remote, 0);
+      });
+  }
+});
+
+test('owner session revoked during D1/GitHub reads prevents release of observations', async () => {
+  let authCalls = 0;
+  await withHost({ overrideOperator: {
+    authenticateOwnerRequest: async () => {
+      authCalls++;
+      return { sessionId: 'synthetic-owner-session-123',
+        ownerAccountId: authCalls === 1 ? 100 : 101 };
+    },
+  } }, async ({ port, store, calls }) => {
+    assert.equal(await store.reserveOnce({
+      repositoryId: 88, pullNumber: 12, headSha: SHA,
+      deliveryId: '12345678-1234-1234-1234-123456789abc',
+    }), true);
+    const response = await send(port);
+    assert.equal(response.status, 401);
+    assert.equal(response.body.reason, 'GUARDIAN_OPERATOR_AUTH_REVOKED');
+    assert.equal(response.body.observations, undefined);
+    assert.equal(response.body.activationAllowed, false);
+    assert.equal(calls.remote, 1);
+    assert.equal(authCalls, 2);
+  });
+});
+
+test('successful response cannot contain unexpected output metadata or token', async () => {
+  await withHost({ batchOverride: async () => forgedBatch([cleanObservation()]) },
+    async ({ port }) => {
+      const result = await send(port);
+      assert.equal(result.status, 200);
+      assert.equal(result.body.observations.length, 1);
+      assert.deepEqual(Object.keys(result.body.observations[0]).sort(), [
+        'headSha', 'observedCheckRunId', 'observedConclusion',
+        'pullNumber', 'reason', 'reservationObserved', 'status',
+      ].sort());
+      assert.equal(JSON.stringify(result.body).includes(TOKEN), false);
+      assert.equal(result.body.authoritativeRequiredCheck, 'NOT_ISSUED');
+      assert.equal(result.body.automaticRetryAllowed, false);
+    });
+});
+
+test('oversized payload metadata is rejected before authentication or GitHub', async () => {
+  await withHost({}, async ({ port, calls }) => {
+    const result = await send(port, { body: ' '.repeat(4100) });
+    assert.equal(result.status, 413);
+    assert.equal(result.body.reason, 'GUARDIAN_OPERATOR_BODY_BOUND_INVALID');
+    assert.equal(calls.auth, 0);
+    assert.equal(calls.remote, 0);
+  });
+});
+
+
+test('read token expiry during batch returns HOLD without leaking observations', async () => {
+  const originalNow = Date.now;
+  const start = originalNow();
+  try {
+    await withHost({ batchOverride: async () => {
+      Date.now = () => start + 20 * 60_000;
+      return forgedBatch([cleanObservation()]);
+    } }, async ({ port }) => {
+      const result = await send(port);
+      assert.equal(result.status, 503);
+      assert.equal(result.body.reason,
+        'GUARDIAN_OPERATOR_TOKEN_EXPIRED_DURING_READ');
+      assert.equal(result.body.observations, undefined);
+      assert.equal(result.body.activationAllowed, false);
+    });
+  } finally {
+    Date.now = originalNow;
+  }
 });
