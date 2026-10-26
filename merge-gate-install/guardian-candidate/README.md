@@ -649,3 +649,75 @@ injections exercise stalled owner auth, CSRF, rate limiting, token issuance,
 GitHub reads, D1 reads, request-body upload, and late backend success.
 All remain strictly operator-only and source-only; no Check POST, database
 delete, deployed listener, GitHub App activation or production trust claim.
+
+
+## Protected host bootstrap and runtime adapter (source-only, default OFF)
+
+`guardian-protected-host.cjs` exports `createGuardianProtectedHost(config)`,
+`bootstrapGuardianProtectedHost(config)` and `GuardianHostError`. It wraps the
+**unmodified** `createGuardianHttpServer` handler with lifecycle, startup
+probes and dependency-fault isolation. Webhook verification, Check publication,
+operator reconciliation and owner onboarding remain in their existing modules.
+Importing the module or calling `createGuardianProtectedHost` opens no port
+and performs no D1 or GitHub I/O.
+
+Configuration is an exact-key object; any unknown key (for example an injected
+`deliveryStore` or `conclusionStore`) is `GUARDIAN_HOST_CONFIG_INVALID` with
+only the field name in the error:
+
+- `listenAddress` must be `127.0.0.1` or `::1`; public exposure and TLS
+  termination are a separate owner-operated component. `port` 0–65535.
+- `mode` is exactly one of `OFF`, `FAILURE_ONLY`, `FULL`. `FAILURE_ONLY`
+  requires `modeGrant: 'EXPLICIT_FAILURE_ONLY'`, `FULL` requires
+  `'EXPLICIT_FULL_CHECK_WRITES'`, and `OFF` must have no grant. A single field
+  makes mixed write modes unrepresentable.
+- Pinned positive integers `guardianAppId`, `trustedInstallationId`,
+  `expectedOwnerAccountId`, `expectedRepositoryId`; `webhookSecret` (32–8192
+  printable characters); `githubAppPrivateKeyPem` must parse as an RSA key of
+  at least 2048 bits; `policyAuthority` must be an Ed25519 public key whose
+  SPKI SHA-256 equals `pinnedSpkiSha256`.
+- `d1Binding` is the raw isolated D1 binding. The host builds the D1 stores
+  itself; there is no way to supply an in-memory store.
+- Optional `operatorReadOnly` / `ownerOnboarding` contain only the
+  owner-authentication callbacks and origins; the host injects the pinned
+  identities and stores. The operator route receives a frozen view exposing
+  **only** `conclusionStore.getReservation`.
+- Optional `startupTimeoutMs` (100–30000, default 5000), `drainTimeoutMs`
+  (0–30000, default 5000), `dependencyFaultThreshold` (1–20, default 3).
+
+`start()` refuses to listen unless every probe passes within the startup
+deadline: the required D1 tables are readable (`GUARDIAN_HOST_D1_SCHEMA_UNAVAILABLE`);
+in a write mode, the D1 installation binding matches all four pinned IDs
+(`GUARDIAN_HOST_INSTALLATION_BINDING_UNVERIFIED`), and the existing
+`mintScopedInstallationToken` + `revalidateCurrentInstallationScope` pass
+(`GUARDIAN_HOST_GITHUB_IDENTITY_UNVERIFIED`; the token is discarded). Any
+failure leaves the host `FAILED` with no listener. `OFF` mode makes no GitHub
+calls and every webhook still returns `FEATURE_OFF`.
+
+While running, D1 store calls are counted. A D1 integrity fault (readback or
+row mismatch, unverified result) latches `GUARDIAN_HOST_D1_INTEGRITY_HOLD`
+immediately; `dependencyFaultThreshold` consecutive I/O faults latch
+`GUARDIAN_HOST_D1_FAULT_HOLD`. A latched host answers every route with 503
+`SOURCE_ONLY_HOLD` without touching D1 or GitHub. Healing D1 alone does not
+release it; only a successful `start()`/`restart()` re-probe clears the latch.
+
+`stop()` stops accepting connections, waits up to `drainTimeoutMs` for
+in-flight requests and then closes remaining sockets (`abandonedInFlight`).
+An abandoned handler may still complete its durable D1 reservation; because
+both write modes share the `(repository_id, pull_number, head_sha)`
+reservation and delivery IDs are permanent tombstones, neither `restart()`
+nor a new process on the same D1 can publish a second Check for that head,
+and an uncertain Check POST is never retried. `status()` always reports
+`activationAllowed: false` and `releaseAuthority: 'NOT_ISSUED'` and never
+includes secrets.
+
+`test/guardian-protected-host.test.cjs` exercises a real loopback listener,
+a temporary SQLite file with the actual schema as the isolated D1 binding,
+ephemeral synthetic RSA/Ed25519 keys and stubbed GitHub transports with
+`https.request` blocked. It covers configuration fail-closed cases, startup
+probe failures and timeout, OFF mode, publish/stop, restart and cross-process
+non-republication, two hosts racing on one D1, uncertain POST, D1 fault and
+integrity latching, a GitHub scope fault, graceful and timed-out drain, the
+read-only operator view and the lifecycle state machine. This is not
+Cloudflare D1 hosted E2E, a GitHub App installation, signal handling or
+process supervision, and it does not authorize activation.
