@@ -813,3 +813,25 @@ native GitHub Approval, or production readiness.
 All prior Founder-only Merge, Deploy, App/Key, Ruleset, Check and production
 actions remain prohibited. The feature is not integrated into a live launcher
 and its activation remains HOLD.
+
+
+### Explicit Protected Host / Supervisor assembly
+
+The inert guardian-host-process-runner.cjs composes the existing strictly
+validated Protected Host with guardian-process-supervisor.cjs. It requires
+explicit protectedHostConfig and a synchronous owner onTerminal callback;
+an injected signalSource and stopDeadlineMs are optional. Importing or
+constructing the runner opens no port and subscribes to no OS signals.
+Only an authorized external process manager may call runner.start().
+
+The returned frozen facade exposes only start(), stop() and status(), not
+protected configuration, D1 stores, tokens, keys, Check writers or the raw
+Host instance. Status shows a strictly validated loopback address/port only
+when RUNNING, never an externally routable URL, and always
+releaseAuthority=NOT_ISSUED, activationAllowed=false. Tests instantiate a
+real Protected Host in OFF mode with the actual SQLite schema and synthetic
+RSA/Ed25519 key fixtures, read /healthz on loopback, then emit a synthetic
+SIGTERM and verify the HTTP listener and process-manager signal handlers close.
+
+This is source-only assembly, not production deployment, public network
+exposure, provisioning, native GitHub approval or runtime activation.

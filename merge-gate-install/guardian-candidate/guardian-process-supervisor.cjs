@@ -27,12 +27,19 @@ class GuardianSupervisorError extends Error {
 function validRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
-function safeHostStatus(host) {
+function safeHostSnapshot(host) {
   try {
     const s = host.status();
-    return validRecord(s) && typeof s.state === 'string' &&
-      s.activationAllowed === false && s.releaseAuthority === 'NOT_ISSUED' ?
-      s.state : null;
+    if (!validRecord(s) || typeof s.state !== 'string' ||
+        s.activationAllowed !== false ||
+        s.releaseAuthority !== 'NOT_ISSUED') return null;
+    const address = s.address;
+    const loopback = validRecord(address) &&
+      ['127.0.0.1', '::1'].includes(address.address) &&
+      Number.isSafeInteger(address.port) && address.port > 0 &&
+      address.port <= 65535 ?
+      Object.freeze({ address: address.address, port: address.port }) : null;
+    return Object.freeze({ state: s.state, loopback });
   } catch (_) { return null; }
 }
 function underDeadline(operation, milliseconds) {
@@ -80,10 +87,13 @@ function createGuardianProcessSupervisor(configuration) {
   let terminalCode = null;
 
   function status() {
+    const snapshot = safeHostSnapshot(host);
     return Object.freeze({
       state, stopReason, terminalCode,
       signalHandlersAttached: listenersAttached,
-      underlyingHostState: safeHostStatus(host),
+      underlyingHostState: snapshot?.state ?? null,
+      // Loopback locator is operational metadata, never a public URL.
+      loopback: state === 'RUNNING' ? snapshot?.loopback ?? null : null,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
     });
   }
@@ -152,7 +162,7 @@ function createGuardianProcessSupervisor(configuration) {
     }
     startPromise = Promise.resolve().then(() => host.start()).then(
       () => {
-        if (safeHostStatus(host) !== 'RUNNING') {
+        if (safeHostSnapshot(host)?.state !== 'RUNNING') {
           throw new GuardianSupervisorError('GUARDIAN_SUPERVISOR_HOST_NOT_READY');
         }
         if (!stopPromise) state = 'RUNNING';
@@ -198,7 +208,7 @@ function createGuardianProcessSupervisor(configuration) {
         if (startPromise) await startPromise;
         if (state === 'FAILED') return status();
         await underDeadline(() => host.stop(), deadline);
-        if (safeHostStatus(host) !== 'STOPPED') {
+        if (safeHostSnapshot(host)?.state !== 'STOPPED') {
           throw new GuardianSupervisorError('GUARDIAN_SUPERVISOR_STOP_UNVERIFIED');
         }
         state = 'STOPPED';
