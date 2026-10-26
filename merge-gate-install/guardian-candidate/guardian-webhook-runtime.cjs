@@ -9,6 +9,7 @@
 const crypto = require('node:crypto');
 const { parseUniqueKeySourceLock } = require('../candidate/verify-source-lock.cjs');
 const { readAndEvaluateGuardianCandidate } = require('./read-and-evaluate.cjs');
+const { readGuardianGithubJson } = require('./github-rest-collector.cjs');
 const { mintScopedInstallationToken, postFailureOnlyCheck,
   postConclusiveSuccessCheck,
   revalidateCurrentInstallationScope } =
@@ -101,6 +102,16 @@ function verifyWebhook({ rawBody, headers, webhookSecret, trustedInstallationId 
       typeof pr.head.sha !== 'string' || !SHA.test(pr.head.sha)) {
     return { ok: false, reason: 'WEBHOOK_TARGET_OUT_OF_SCOPE' };
   }
+  // A review event can arrive after a newer push. The authenticated review
+  // must bind to the same immutable commit as the event's PR head, otherwise
+  // it must not consume a durable delivery or trigger any Check.
+  if (event === 'pull_request_review' &&
+      (!record(payload.review) ||
+       !['approved', 'changes_requested', 'commented', 'dismissed'].includes(
+         payload.review.state) ||
+       payload.review.commit_id !== pr.head.sha)) {
+    return { ok: false, reason: 'WEBHOOK_REVIEW_EXACT_HEAD_UNVERIFIED' };
+  }
   return { ok: true, deliveryId, installationId: trustedInstallationId,
     pullNumber: pr.number, headSha: pr.head.sha };
 }
@@ -156,6 +167,64 @@ async function processGuardianReconciliation({ pullNumber, headSha, host,
   }, host);
 }
 
+/**
+ * Last-mile check target guard. Even valid signed webhook bytes can be stale
+ * by the time the independent host posts a Check. This reads the live PR from
+ * GitHub using the separately minted repository-scoped installation token.
+ * No target identifier or hostname from the webhook is used as an HTTP URL.
+ */
+async function freshCurrentTarget(parsed, host, token) {
+  try {
+    const response = await readGuardianGithubJson('/repos/nohandsai01/test/pulls/' +
+      parsed.pullNumber, token);
+    const pr = response.body;
+    return !response.link && record(pr) && pr.number === parsed.pullNumber &&
+      pr.state === 'open' && pr.draft === false &&
+      record(pr.base) && pr.base.ref === 'main' &&
+      record(pr.base.repo) &&
+      pr.base.repo.full_name === REPO &&
+      pr.base.repo.id === host.expectedRepositoryId &&
+      record(pr.head) && pr.head.sha === parsed.headSha &&
+      record(pr.head.repo) && pr.head.repo.full_name === REPO &&
+      pr.head.repo.id === host.expectedRepositoryId;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Exactly one check publication attempt per repository/PR/head, across ALL
+ * configured write modes and concurrent delivery IDs. No in-memory fallback:
+ * the unique persistent D1 constraint is the final authority for reservation.
+ * Failed or uncertain reservations are permanent HOLDs, never auto-retried.
+ */
+async function reserveAndRecheckConclusion(parsed, host, token) {
+  if (!(await freshCurrentTarget(parsed, host, token))) {
+    return hold('FRESH_PR_TARGET_UNVERIFIED', { deliveryId: parsed.deliveryId });
+  }
+  try {
+    const reserved = await host.conclusionStore.reserveOnce({
+      repositoryId: host.expectedRepositoryId,
+      pullNumber: parsed.pullNumber, headSha: parsed.headSha,
+      deliveryId: parsed.deliveryId,
+    });
+    if (reserved !== true) {
+      return hold('CONCLUSION_ALREADY_RESERVED_OR_UNRECONCILED',
+        { deliveryId: parsed.deliveryId });
+    }
+  } catch (_) {
+    return hold('CONCLUSION_RESERVATION_UNVERIFIED',
+      { deliveryId: parsed.deliveryId });
+  }
+  // A moved head after the reservation must not be published. The durable
+  // tombstone remains, requiring independent reconciliation of that head.
+  if (!(await freshCurrentTarget(parsed, host, token))) {
+    return hold('PR_TARGET_CHANGED_AFTER_RESERVATION',
+      { deliveryId: parsed.deliveryId });
+  }
+  return null;
+}
+
 async function processVerifiedGuardianTarget(parsed, host) {
   // Reject conflicting raw switches even if only one authorization grant is
   // present. Authorization must not silently resolve a mixed host setting.
@@ -182,8 +251,8 @@ async function processVerifiedGuardianTarget(parsed, host) {
       !Number.isSafeInteger(host.expectedRepositoryId) ||
       host.expectedRepositoryId <= 0 ||
       typeof host.githubAppPrivateKeyPem !== 'string' ||
-      (fullMode && (!host.conclusionStore ||
-        typeof host.conclusionStore.reserveOnce !== 'function'))) {
+      !host.conclusionStore ||
+      typeof host.conclusionStore.reserveOnce !== 'function') {
     return hold('HOST_TRUST_OR_DURABLE_REPLAY_STORE_MISSING');
   }
 
@@ -288,15 +357,11 @@ async function processVerifiedGuardianTarget(parsed, host) {
         freshSignature.payloadSha256 !== evidence.signedPolicySha256) {
       return hold('SIGNED_SUCCESS_AUTHORITY_STALE');
     }
-    // Atomic once-per-head gate is deliberately placed *after* the positive
-    // read: an early incomplete review does not permanently burn the head.
-    try {
-      if (await host.conclusionStore.reserveOnce({
-        repositoryId: host.expectedRepositoryId,
-        pullNumber: parsed.pullNumber, headSha: parsed.headSha,
-        deliveryId: parsed.deliveryId,
-      }) !== true) return hold('CONCLUSION_ALREADY_RESERVED_OR_UNRECONCILED');
-    } catch (_) { return hold('CONCLUSION_RESERVATION_UNVERIFIED'); }
+    // Reservation follows policy and provenance checks, so ordinary pending
+    // reviews do not permanently burn a head. Both modes share this gate.
+    const conclusionHold = await reserveAndRecheckConclusion(parsed, host,
+      installationToken.token);
+    if (conclusionHold) return conclusionHold;
     try {
       const receipt = await postConclusiveSuccessCheck({
         token: installationToken.token, headSha: parsed.headSha,
@@ -314,17 +379,15 @@ async function processVerifiedGuardianTarget(parsed, host) {
       return hold('SUCCESS_CHECK_NOT_CONFIRMED', { deliveryId: parsed.deliveryId });
     }
   }
-  if (terminalFailure) {
-    try {
-      if (await host.conclusionStore.reserveOnce({
-        repositoryId: host.expectedRepositoryId,
-        pullNumber: parsed.pullNumber, headSha: parsed.headSha,
-        deliveryId: parsed.deliveryId,
-      }) !== true) return hold('CONCLUSION_ALREADY_RESERVED_OR_UNRECONCILED');
-    } catch (_) { return hold('CONCLUSION_RESERVATION_UNVERIFIED'); }
-  }
+  // Failure-only checks also occupy the SAME durable conclusion slot.
+  // An unrelated delivery cannot overwrite a previous success/failure on an
+  // unchanged head or produce conflicting completed Check Runs.
+  const conclusionHold = await reserveAndRecheckConclusion(parsed, host,
+    installationToken.token);
+  if (conclusionHold) return conclusionHold;
   try {
     const receipt = await postFailureOnlyCheck({ token: installationToken.token,
+      appId: host.guardianAppId,
       headSha: parsed.headSha,
       summary: 'Source-only Guardian candidate: ' + reason +
         '. Independent release authority and Founder activation are not established.',

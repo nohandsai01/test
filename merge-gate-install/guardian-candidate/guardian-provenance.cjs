@@ -30,39 +30,68 @@ function nextPage(link) {
 }
 
 async function pagesArray(path, token, limit) {
-  const rows = [];
+  const rows = [], observedPages = [];
   for (let page = 1; page <= Math.ceil(limit / 25) + 1; page++) {
-    const response = await readGuardianGithubJson(path +
-      (path.includes('?') ? '&' : '?') + 'per_page=25&page=' + page, token);
+    const currentPath = path + (path.includes('?') ? '&' : '?') +
+      'per_page=25&page=' + page;
+    const response = await readGuardianGithubJson(currentPath, token);
     requireProof(Array.isArray(response.body) && response.body.length <= 25,
       'GUARDIAN_PROVENANCE_PAGE_INVALID');
+    // Independently retain every fetched page, not just page 1. If a middle
+    // page is replaced while pagination progresses, no partial list is safe.
+    observedPages.push({ path: currentPath, body: JSON.stringify(response.body),
+      link: response.link });
     rows.push(...response.body);
     requireProof(rows.length <= limit, 'GUARDIAN_PROVENANCE_PAGE_LIMIT');
     const more = nextPage(response.link);
     requireProof(!more || response.body.length === 25,
       'GUARDIAN_PROVENANCE_PAGINATION_INCOMPLETE');
-    if (!more) return rows;
+    if (!more) {
+      for (const prior of observedPages) {
+        const reread = await readGuardianGithubJson(prior.path, token);
+        requireProof(Array.isArray(reread.body) &&
+          JSON.stringify(reread.body) === prior.body &&
+          reread.link === prior.link,
+        'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+      }
+      // This is a bounded consistency check, NOT an atomic GitHub snapshot.
+      return rows;
+    }
   }
   throw new GuardianProvenanceError('GUARDIAN_PROVENANCE_PAGINATION_LIMIT');
 }
 
 async function pagesCounted(path, key, token, limit) {
-  const rows = [];
+  const rows = [], observedPages = [];
   let total = null;
   for (let page = 1; page <= Math.ceil(limit / 25) + 1; page++) {
-    const response = await readGuardianGithubJson(path +
-      (path.includes('?') ? '&' : '?') + 'per_page=25&page=' + page, token);
+    const currentPath = path + (path.includes('?') ? '&' : '?') +
+      'per_page=25&page=' + page;
+    const response = await readGuardianGithubJson(currentPath, token);
     const body = response.body;
-    requireProof(object(body) && positive(body.total_count + 1) &&
-      body.total_count <= limit && Array.isArray(body[key]),
-    'GUARDIAN_PROVENANCE_COUNT_INVALID');
+    requireProof(object(body) && Number.isSafeInteger(body.total_count) &&
+      body.total_count >= 0 && body.total_count <= limit &&
+      Array.isArray(body[key]), 'GUARDIAN_PROVENANCE_COUNT_INVALID');
     if (total === null) total = body.total_count;
     requireProof(body.total_count === total &&
       body[key].length === Math.min(25, total - rows.length) &&
       nextPage(response.link) === (rows.length + body[key].length < total),
     'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+    observedPages.push({ path: currentPath, body: JSON.stringify(body),
+      link: response.link });
     rows.push(...body[key]);
-    if (rows.length === total) return rows;
+    if (rows.length === total) {
+      // Include empty collections and every workflow run/job page: replacing a
+      // success with a failure during enumeration must never produce ALLOW.
+      for (const prior of observedPages) {
+        const reread = await readGuardianGithubJson(prior.path, token);
+        requireProof(object(reread.body) &&
+          JSON.stringify(reread.body) === prior.body &&
+          reread.link === prior.link,
+        'GUARDIAN_PROVENANCE_PAGE_CHANGED');
+      }
+      return rows;
+    }
   }
   throw new GuardianProvenanceError('GUARDIAN_PROVENANCE_PAGINATION_LIMIT');
 }
@@ -76,13 +105,28 @@ function reviewEvidence(reviews, release, authorId, headSha) {
       (review.state === 'PENDING' || timestamp(review.submitted_at)),
     'GUARDIAN_REVIEW_RESPONSE_INVALID');
     ids.add(review.id);
-    if (review.state === 'PENDING') continue;
+    // A COMMENTED review does not change the reviewer's decision on GitHub.
+    // Keep the last APPROVED, CHANGES_REQUESTED or DISMISSED state instead;
+    // otherwise a later ordinary comment can erase a blocking change request.
+    if (review.state === 'PENDING' || review.state === 'COMMENTED') continue;
     const prior = latest.get(review.user.id);
-    if (!prior || Date.parse(review.submitted_at) > Date.parse(prior.submitted_at) ||
-        (review.submitted_at === prior.submitted_at && review.id > prior.id)) {
+    // GitHub can encode the exact same instant as ...:00Z or ...:00.000Z.
+    // Compare parsed instants, then break ties by review ID. A later
+    // CHANGES_REQUESTED must never lose to an older exact-head APPROVED
+    // merely because the two valid timestamp strings differ in spelling.
+    const submittedTime = Date.parse(review.submitted_at);
+    const priorTime = prior ? Date.parse(prior.submitted_at) : null;
+    if (!prior || submittedTime > priorTime ||
+        (submittedTime === priorTime && review.id > prior.id)) {
       latest.set(review.user.id, review);
     }
   }
+  // An unresolved request for changes by ANY reviewer invalidates a
+  // conclusive positive claim. The designated allowlist must not hide
+  // a blocking review from another GitHub user.
+  requireProof(![...latest.values()].some((review) =>
+    review.state === 'CHANGES_REQUESTED'),
+  'GUARDIAN_REVIEW_CHANGES_REQUESTED');
   let approvals = 0;
   for (const id of release.reviewerIds) {
     const review = latest.get(id);
@@ -163,6 +207,7 @@ async function rulesetBypassEvidence(rules, token) {
     ids.add(rule.ruleset_id);
   }
   requireProof(ids.size > 0, 'GUARDIAN_ACTIVE_RULESET_IDENTITY_UNVERIFIED');
+  const observed = [];
   for (const id of ids) {
     const response = await readGuardianGithubJson(PREFIX + '/rulesets/' + id,
       token);
@@ -176,32 +221,57 @@ async function rulesetBypassEvidence(rules, token) {
       'GUARDIAN_RULESET_BYPASS_ACTORS_UNOBSERVABLE');
     requireProof(response.body.bypass_actors.length === 0,
       'GUARDIAN_RULESET_BYPASS_ACTORS_PRESENT');
+    observed.push({ id, bytes: JSON.stringify(response.body), link: response.link });
   }
+  return observed;
+}
+
+function candidateScopedPath(filename) {
+  // GitHub rename entries contain two paths. Both must satisfy the same
+  // restriction: a protected source cannot be moved into an allowed folder.
+  return typeof filename === 'string' && filename.length < 500 &&
+    /^(src|test|docs)\/[A-Za-z0-9._/\-]+$/.test(filename) &&
+    filename.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
 }
 
 function validateTouchedFiles(files) {
+  requireProof(Array.isArray(files), 'GUARDIAN_PR_FILE_RESPONSE_INVALID');
   requireProof(files.length > 0, 'GUARDIAN_PR_NO_CHANGED_FILES');
-  const seen = new Set();
+  const seen = new Set(), renamedOrigins = new Set();
   for (const file of files) {
     requireProof(object(file) && typeof file.filename === 'string' &&
       file.filename.length < 500 && !seen.has(file.filename) &&
       ['added', 'modified', 'removed', 'renamed', 'copied', 'changed'].includes(file.status),
     'GUARDIAN_PR_FILE_RESPONSE_INVALID');
     seen.add(file.filename);
-    // Workflow source must not be supplied or changed by the PR author.
-    // This candidate only approves the repository's bounded application scope.
-    requireProof(/^(src|test|docs)\/[A-Za-z0-9._/\-]+$/.test(file.filename) &&
-      !file.filename.split('/').includes('..') &&
-      (file.status !== 'renamed' ||
-        (typeof file.previous_filename === 'string' &&
-         /^(src|test|docs)\/[A-Za-z0-9._/\-]+$/.test(file.previous_filename))),
+    // Both rename and copy report an old source path. A protected source
+    // cannot be smuggled into an allowed destination through either status.
+    // Reject unexpected origin metadata on other statuses as ambiguous.
+    const hasOrigin = Object.hasOwn(file, 'previous_filename');
+    const needsOrigin = file.status === 'renamed' || file.status === 'copied';
+    requireProof(candidateScopedPath(file.filename) &&
+      (needsOrigin ?
+        (hasOrigin && candidateScopedPath(file.previous_filename) &&
+         file.previous_filename !== file.filename) :
+        !hasOrigin),
     'GUARDIAN_PR_CHANGED_PROTECTED_SOURCE');
+    // Two distinct rename destinations cannot both claim the same source.
+    // Copies may share a source, but cannot skip or disguise that source.
+    if (file.status === 'renamed') {
+      requireProof(!renamedOrigins.has(file.previous_filename),
+        'GUARDIAN_PR_DUPLICATE_RENAME_ORIGIN');
+      renamedOrigins.add(file.previous_filename);
+    }
   }
 }
 
 async function workflowJobProof({ token, headSha, check, binding }) {
   const runs = await pagesCounted(PREFIX + '/actions/workflows/' +
     binding.workflowId + '/runs?head_sha=' + headSha, 'workflow_runs', token, 60);
+  // A good check-suite is not sufficient when the same workflow/head has
+  // a newer failed run. Refuse ambiguous competing runs rather than selecting
+  // only the successful one to prove the required workflow.
+  requireProof(runs.length === 1, 'GUARDIAN_WORKFLOW_RUN_AMBIGUOUS');
   const linked = runs.filter((run) => object(run) &&
     run.check_suite_id === check.check_suite?.id);
   requireProof(linked.length === 1, 'GUARDIAN_WORKFLOW_RUN_AMBIGUOUS');
@@ -221,7 +291,12 @@ async function workflowJobProof({ token, headSha, check, binding }) {
     matched[0].head_sha === headSha && matched[0].name === check.name &&
     matched[0].status === 'completed' && matched[0].conclusion === 'success' &&
     matched[0].run_attempt === run.run_attempt &&
-    timestamp(matched[0].completed_at),
+    positive(matched[0].id) && timestamp(matched[0].completed_at) &&
+    timestamp(check.completed_at) &&
+    Date.parse(matched[0].completed_at) >= Date.parse(run.created_at) &&
+    Date.parse(matched[0].completed_at) <= Date.parse(run.updated_at) &&
+    Date.parse(check.completed_at) >= Date.parse(run.created_at) &&
+    Date.parse(check.completed_at) <= Date.parse(run.updated_at),
   'GUARDIAN_CHECK_NOT_ASSOCIATED_WITH_WORKFLOW_JOB');
   return { workflowId: binding.workflowId, runId: run.id,
     jobId: matched[0].id, checkRunId: check.id };
@@ -232,7 +307,10 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
   requireProof(positive(pullNumber) && SHA.test(headSha) &&
     typeof installationToken === 'string' && installationToken.length >= 16 &&
     object(snapshot) && object(snapshot.pullRequest) &&
-    object(snapshot.checkRuns) && object(releasePolicy) &&
+    object(snapshot.checkRuns) && Array.isArray(snapshot.checkRuns.check_runs) &&
+    Number.isSafeInteger(snapshot.checkRuns.total_count) &&
+    snapshot.checkRuns.total_count === snapshot.checkRuns.check_runs.length &&
+    object(releasePolicy) &&
     Array.isArray(expectedEvidence) && expectedEvidence.length === 2 &&
     releasePolicy.guardianAppId === guardianAppId && positive(guardianAppId),
   'GUARDIAN_CONCLUSIVE_INPUT_INVALID');
@@ -241,6 +319,14 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     pr.draft === false && pr.head?.sha === headSha &&
     positive(pr.author?.id) && pr.author.type === 'User',
   'GUARDIAN_PR_NOT_REVIEWABLE_AT_HEAD');
+  // GitHub exposes an independent PR-level changed_files count. A partial
+  // files page (even one hiding protected source) must never be promoted.
+  requireProof(positive(pr.changedFiles) && pr.changedFiles <= 300,
+    'GUARDIAN_PR_CHANGED_FILE_COUNT_UNVERIFIED');
+  // The PR commits endpoint truncates at 250; do not approve a partial
+  // contributor history and accidentally treat the reviewer as independent.
+  requireProof(positive(pr.commitCount) && pr.commitCount <= 250,
+    'GUARDIAN_PR_COMMIT_COUNT_UNVERIFIED');
 
   const [commits, reviews, files, rules] = await Promise.all([
     pagesArray(PREFIX + '/pulls/' + pullNumber + '/commits', installationToken, 250),
@@ -249,19 +335,29 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     readGuardianGithubJson(PREFIX + '/rules/branches/main', installationToken),
   ]);
   requireProof(!nextPage(rules.link), 'GUARDIAN_BRANCH_RULES_PAGINATION_UNKNOWN');
+  requireProof(commits.length === pr.commitCount,
+    'GUARDIAN_PR_COMMIT_COUNT_MISMATCH');
   requireProof(commits.length > 0 &&
     commits.every((commit) => object(commit) && SHA.test(commit.sha)) &&
     new Set(commits.map((commit) => commit.sha)).size === commits.length &&
     commits[commits.length - 1].sha === headSha,
   'GUARDIAN_LAST_PR_COMMIT_NOT_EXACT_HEAD');
+  // GitHub allows unlinked author/committer accounts in commit history. If
+  // either identity is unknown, this source-only reader cannot exclude
+  // reviewer contribution, even with a valid SHA and exact commit count.
+  requireProof(commits.every((commit) =>
+    positive(commit.author?.id) && positive(commit.committer?.id)),
+  'GUARDIAN_COMMIT_ACTOR_IDENTITY_UNVERIFIED');
   const contributors = new Set(commits.flatMap((commit) =>
-    [commit.author?.id, commit.committer?.id].filter(positive)));
+    [commit.author.id, commit.committer.id]));
   requireProof(releasePolicy.reviewerIds.every((id) => !contributors.has(id)),
     'GUARDIAN_REVIEWER_IS_COMMIT_CONTRIBUTOR');
+  requireProof(files.length === pr.changedFiles,
+    'GUARDIAN_PR_CHANGED_FILE_COUNT_MISMATCH');
   validateTouchedFiles(files);
   branchRulesEvidence(rules.body, guardianAppId, releasePolicy.minApprovals,
     expectedEvidence);
-  await rulesetBypassEvidence(rules.body, installationToken);
+  const initialRulesetState = await rulesetBypassEvidence(rules.body, installationToken);
   const approvedCount = reviewEvidence(reviews, releasePolicy, pr.author.id, headSha);
 
   const workflowProofs = [];
@@ -270,17 +366,37 @@ async function collectGuardianConclusiveProvenance({ pullNumber, headSha,
     requireProof(matching.length === 1, 'GUARDIAN_WORKFLOW_POLICY_AMBIGUOUS');
     const spec = expectedEvidence.filter((item) => item.type === binding.type);
     requireProof(spec.length === 1, 'GUARDIAN_EXPECTED_CHECK_POLICY_AMBIGUOUS');
-    const policyChecks = snapshot.checkRuns.check_runs.filter((check) =>
-      check.name === spec[0].checkName && check.app?.id === spec[0].issuerAppId &&
-      check.head_sha === headSha && check.status === 'completed' &&
-      check.conclusion === 'success');
-    // A caller must supply the independently signed expected check mappings;
-    // never infer them from a run's self-reported name.
-    requireProof(policyChecks.length === 1,
+    // Require uniqueness BEFORE considering success. A failed/pending check
+    // with the same required name cannot be hidden by selecting one green run.
+    const named = snapshot.checkRuns.check_runs.filter((check) =>
+      object(check) && check.name === spec[0].checkName);
+    requireProof(named.length === 1 &&
+      named[0].app?.id === spec[0].issuerAppId &&
+      named[0].head_sha === headSha && named[0].status === 'completed' &&
+      named[0].conclusion === 'success' && positive(named[0].id) &&
+      positive(named[0].check_suite?.id),
       'GUARDIAN_WORKFLOW_EXPECTED_CHECK_MISSING');
+    const policyChecks = named;
     workflowProofs.push(await workflowJobProof({ token: installationToken,
       headSha, check: policyChecks[0], binding }));
   }
+  // Runs/jobs can take time. A review can be revoked or a ruleset bypass
+  // introduced while those API reads are in progress. A final second-pass
+  // read closes this observed window; it is NOT an atomic GitHub transaction.
+  const finalReviews = await pagesArray(PREFIX + '/pulls/' + pullNumber +
+    '/reviews', installationToken, 500);
+  requireProof(JSON.stringify(finalReviews) === JSON.stringify(reviews),
+    'GUARDIAN_REVIEWS_CHANGED_DURING_PROVENANCE');
+  const finalRules = await readGuardianGithubJson(PREFIX + '/rules/branches/main',
+    installationToken);
+  requireProof(finalRules.link === rules.link &&
+    JSON.stringify(finalRules.body) === JSON.stringify(rules.body),
+  'GUARDIAN_RULES_CHANGED_DURING_PROVENANCE');
+  const finalRulesetState = await rulesetBypassEvidence(finalRules.body,
+    installationToken);
+  requireProof(JSON.stringify(finalRulesetState) ===
+    JSON.stringify(initialRulesetState),
+  'GUARDIAN_RULESETS_CHANGED_DURING_PROVENANCE');
   return Object.freeze({ approvedCount, lastCommitSha: headSha,
     workflowProofs, rulesetBoundToGuardianApp: true,
     rulesetBypassActorsVerified: true,
