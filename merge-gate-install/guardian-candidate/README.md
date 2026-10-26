@@ -722,3 +722,49 @@ integrity latching, a GitHub scope fault, graceful and timed-out drain, the
 read-only operator view and the lifecycle state machine. This is not
 Cloudflare D1 hosted E2E, a GitHub App installation, signal handling or
 process supervision, and it does not authorize activation.
+
+
+## Final integration candidate (source-only, default OFF)
+
+Branch `integrate/guardian-final-20261026` combines three writer heads
+without rewriting them: the protected host (`8b68e883`, which already contains
+the operator HTTP branch `c7c3e58e`) plus a merge of the Guardian core PR #12
+head `8af6a851`. That head was not an ancestor of the operator branch, so its
+batch hard-cap against hostile array iterators was missing; the merge is
+conflict-free and leaves the batch report shape unchanged.
+
+One host source change was needed: when the inner HTTP server rejects the
+operator or onboarding configuration, the host now constructs each handler
+alone on that error path and reports the section that was actually rejected
+(`operatorReadOnly`, `ownerOnboarding` or `httpServer`). Previously a valid
+operator section could be blamed for an invalid onboarding section.
+
+`test/guardian-integrated-host-operator.test.cjs` runs the webhook runtime,
+D1 durable reservation and read-only operator reconciliation together behind
+one protected host on a loopback listener and a temporary SQLite file with the
+real schema (GitHub stubbed, `https.request` blocked, synthetic keys):
+
+- a failure-only Check recorded by a webhook is observed by the operator as
+  `RECONCILIATION_CHECK_OBSERVED_ONLY`; the reservation row is byte-identical
+  after operator queries and after `restart()`, and a later webhook for the
+  same head stays `CONCLUSION_ALREADY_RESERVED_OR_UNRECONCILED`;
+- through the host, the operator fails closed on a revoked owner session, a
+  read token expiring mid-read, and stalled GitHub or token-issuer
+  dependencies, without observations or D1 changes;
+- a client disconnect and a host `stop()` (drain deadline) both propagate the
+  operator `AbortSignal`, send no response and write nothing; `stop()`
+  force-closes at its drain deadline instead of waiting for the operator's
+  own deadline;
+- a D1 outage hit by an operator read latches the host dependency HOLD, after
+  which webhooks and operator calls are refused without D1/GitHub I/O;
+- two integrated hosts on one D1 file publish one Check across four racing
+  deliveries and return identical read-only observations;
+- a static closure check over the committed candidate source: only
+  `guardian-webhook-runtime.cjs` references a Check writer, reserves a
+  conclusion or exposes owner reconciliation; the operator import chain cannot
+  reach `github-app-identity.cjs`, the runtime or the D1 store module; the host
+  always sets `enableOwnerReconciliation: false`.
+
+Not covered: Cloudflare D1 hosted E2E, a real GitHub App installation, real
+keys or Checks, TLS termination, signal handling/process supervision and any
+production activation. Independent QA and security review remain required.

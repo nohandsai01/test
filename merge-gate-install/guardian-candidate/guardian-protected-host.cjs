@@ -19,6 +19,8 @@ const crypto = require('node:crypto');
 const appIdentity = require('./github-app-identity.cjs');
 const { createGuardianHttpServer } = require('./guardian-http-server.cjs');
 const { createGuardianD1Stores } = require('./guardian-d1-stores.cjs');
+const { createGuardianOperatorHttpHandler } = require('./guardian-operator-http.cjs');
+const { createGuardianOwnerHttpHandler } = require('./guardian-owner-http.cjs');
 
 const MODE_GRANTS = Object.freeze({
   FAILURE_ONLY: 'EXPLICIT_FAILURE_ONLY',
@@ -242,8 +244,17 @@ function createGuardianProtectedHost(config) {
   try {
     inner = createGuardianHttpServer({ host: Object.freeze(innerHost) });
   } catch (_) {
-    throw new GuardianHostError('GUARDIAN_HOST_CONFIG_INVALID',
-      config.operatorReadOnly !== undefined ? 'operatorReadOnly' : 'ownerOnboarding');
+    // Error path only: construct each handler alone (no I/O) to name the
+    // section the existing handler rejected instead of guessing.
+    const rejects = (factory, section) => {
+      try { factory({ host: section }); return false; } catch (_) { return true; }
+    };
+    const field = innerHost.operatorReadOnly &&
+      rejects(createGuardianOperatorHttpHandler, innerHost.operatorReadOnly) ?
+      'operatorReadOnly' : innerHost.ownerOnboarding &&
+      rejects(createGuardianOwnerHttpHandler, innerHost.ownerOnboarding) ?
+        'ownerOnboarding' : 'httpServer';
+    throw new GuardianHostError('GUARDIAN_HOST_CONFIG_INVALID', field);
   }
   const [innerHandler] = inner.listeners('request');
   if (typeof innerHandler !== 'function') {
