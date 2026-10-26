@@ -835,3 +835,41 @@ SIGTERM and verify the HTTP listener and process-manager signal handlers close.
 
 This is source-only assembly, not production deployment, public network
 exposure, provisioning, native GitHub approval or runtime activation.
+
+
+## G16 — owner-controlled isolated child process manager (source-only)
+
+guardian-local-process-controller.cjs implements an explicitly operated
+local child-process lifecycle wrapper for the previously built Guardian
+Host/Supervisor. Merely importing/constructing this module does not
+spawn a child, configure a Host, create keys or contact GitHub/D1.
+
+- Owner supplies an absolute, existing regular-file child entrypoint beneath
+  a canonical pinned directory; symlinks and path changes before start are
+  rejected. The module does not accept PR-supplied scripts or executable
+  paths. Only the owner-controlled caller may invoke start().
+- The child is started with Node's fixed process.execPath and shell=false,
+  a minimal non-inherited environment (no app keys, GitHub tokens or secret
+  refs passed via argv/environment) and an IPC-only lifecycle protocol.
+- A valid READY message is a minimal source-only/HOLD receipt; it cannot
+  enable real release authority. Unknown, duplicate, hostile or premature
+  messages are protocol failures and never authorize any Check.
+- The parent bounds readiness and graceful SIGTERM shutdown, escalating to
+  SIGKILL **only for the ChildProcess instance it actually created** on
+  timeout or a malicious child that ignores SIGTERM. No arbitrary PID, system
+  process, Docker service or hosted runtime is addressed.
+- Child exit is STOPPED only when a graceful stop was requested, a valid
+  TERMINAL frame was observed and exit code was zero. Unexpected exit,
+  startup failure, bad protocol, nonzero exit, forced shutdown, invalid
+  terminal callback, or a stop before READY all remain FAILED.
+- There is no auto-restart, remote registration, privilege elevation,
+  production deployment, real Host configuration loading or real Check
+  issuance. A separate owner process manager is responsible for immutable
+  deployment images, key custody, and explicit staging activation.
+
+Tests launch disposable local Node fixtures, establish loopback listeners,
+exercise readiness/terminal IPC, SIGTERM escalation, child death, startup
+timeout, rejected frames, duplicate events, and shutdown races. All statuses
+and receipts stay non-authorizing. The tests do not use real keys or any
+production D1/GitHub App. Completion is source-only until separately
+authorized hosted E2E acceptance.
