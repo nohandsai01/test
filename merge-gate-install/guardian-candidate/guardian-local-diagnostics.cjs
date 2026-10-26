@@ -22,6 +22,8 @@ const RECEIPT_KEYS = new Set(['schemaVersion', 'eventId', 'timestamp',
   'state', 'errorCode', 'hostStopped', 'activationAllowed',
   'releaseAuthority', 'automaticRestartAllowed']);
 const MAX_ENTRIES = 4096;
+const CONTROLLER_STATUS_FIELDS = new Set(['state', 'errorCode', 'pid',
+  'activationAllowed', 'releaseAuthority', 'automaticRestartAllowed']);
 
 function record(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -72,17 +74,6 @@ function report(reason, state, record, count, digest) {
     releaseAuthority: 'NOT_ISSUED',
   });
 }
-function safeController(controller) {
-  try {
-    const status = controller.status();
-    return record(status) && STATES.has(status.state) &&
-      status.activationAllowed === false &&
-      status.releaseAuthority === 'NOT_ISSUED' &&
-      status.automaticRestartAllowed === false ?
-      status.state : null;
-  } catch (_) { return null; }
-}
-
 function createGuardianLocalDiagnostics(options) {
   if (!record(options) || Object.keys(options).some((k) => !KEYS.has(k)) ||
       !options.controller || typeof options.controller.status !== 'function' ||
@@ -97,14 +88,28 @@ function createGuardianLocalDiagnostics(options) {
     throw new Error('GUARDIAN_DIAGNOSTICS_CONFIG_INVALID');
   }
   const directory = fs.realpathSync(options.directory);
-  const stats = fs.statSync(directory);
-  if (!stats.isDirectory() || (stats.mode & 0o077) !== 0 ||
+  const stats = fs.lstatSync(directory);
+  if (!stats.isDirectory() || stats.isSymbolicLink() ||
+      (stats.mode & 0o077) !== 0 ||
       (typeof process.getuid === 'function' && stats.uid !== process.getuid())) {
     throw new Error('GUARDIAN_DIAGNOSTICS_DIRECTORY_UNVERIFIED');
   }
   const file = path.join(directory, options.fileName);
   const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
-
+  const pinnedDirectory = Object.freeze({
+    dev: stats.dev, ino: stats.ino,
+  });
+  function directoryTrusted() {
+    try {
+      const current = fs.lstatSync(directory);
+      return current.isDirectory() && !current.isSymbolicLink() &&
+        current.dev === pinnedDirectory.dev &&
+        current.ino === pinnedDirectory.ino &&
+        (current.mode & 0o077) === 0 &&
+        (typeof process.getuid !== 'function' ||
+          current.uid === process.getuid());
+    } catch (_) { return false; }
+  }
 
 function observed(reason, state, row, count, digest, rows = null) {
   return { observation: report(reason, state, row, count, digest), rows };
@@ -154,10 +159,79 @@ function validatePageRequest(options) {
   }
   return Object.freeze({ limit, cursor: cursor ? Object.freeze(cursor) : null });
 }
+
+// An incident query selects an actual FAILED receipt from one validated
+// journal snapshot. The optional digest pins that exact local snapshot,
+// rather than treating an earlier read as if it were still current.
+const EVIDENCE_OPTIONS = new Set(['eventId', 'journalSha256']);
+const EVENT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256 = /^[0-9a-f]{64}$/;
+function validateEvidenceRequest(input) {
+  const data = ownData(input, EVIDENCE_OPTIONS);
+  if (!data) throw new Error('GUARDIAN_EVIDENCE_REQUEST_INVALID');
+  const eventId = data.eventId === undefined ? null : data.eventId;
+  const expectedDigest = data.journalSha256 === undefined ?
+    null : data.journalSha256;
+  if (eventId !== null &&
+      (typeof eventId !== 'string' || !EVENT_UUID.test(eventId)) ||
+      expectedDigest !== null &&
+      (typeof expectedDigest !== 'string' || !SHA256.test(expectedDigest))) {
+    throw new Error('GUARDIAN_EVIDENCE_REQUEST_INVALID');
+  }
+  return Object.freeze({ eventId, expectedDigest });
+}
+
+function evidenceEnvelope(observation, reason, details = null) {
+  const valid = details !== null;
+  const fields = {
+    schemaVersion: 1,
+    kind: 'GUARDIAN_LOCAL_FAULT_EVIDENCE_V1',
+    authority: 'LOCAL_UNAUTHENTICATED_OBSERVATION',
+    status: 'SOURCE_ONLY_HOLD',
+    availability: valid ? 'LOCAL_SNAPSHOT' : 'UNAVAILABLE',
+    reason,
+    sourceReason: observation.reason,
+    processState: observation.processState,
+    liveness: 'NOT_PROVEN',
+    manualInterventionRequired: true,
+    journalEntries: valid ? observation.journalEntries : 0,
+    journalSha256: valid ? observation.journalSha256 : null,
+    failureCount: valid ? details.failureCount : 0,
+    eventSequence: valid ? details.eventSequence : null,
+    selectedFailure: valid ? details.selectedFailure : null,
+    previousReceipt: valid ? details.previousReceipt : null,
+    nextReceipt: valid ? details.nextReceipt : null,
+    firstFailure: valid ? details.firstFailure : null,
+    latestFailure: valid ? details.latestFailure : null,
+    automaticRestartAllowed: false,
+    activationAllowed: false,
+    releaseAuthority: 'NOT_ISSUED',
+  };
+  const evidenceSha256 = valid ? crypto.createHash('sha256')
+    .update(JSON.stringify(fields), 'utf8').digest('hex') : null;
+  return Object.freeze({ ...fields, evidenceSha256 });
+}
+
+  function safeController(controller) {
+    try {
+      // A Controller status is a local capability assertion. Never read a
+      // mutable accessor repeatedly and accidentally report STOPPED from a
+      // changing getter. Real controller statuses contain only these fields.
+      const status = ownData(controller.status(), CONTROLLER_STATUS_FIELDS);
+      return status && STATES.has(status.state) &&
+        status.activationAllowed === false &&
+        status.releaseAuthority === 'NOT_ISSUED' &&
+        status.automaticRestartAllowed === false ?
+        status.state : null;
+    } catch (_) { return null; }
+  }
   function readSnapshot() {
     const before = safeController(options.controller);
     if (before === null) return observed(
       'GUARDIAN_DIAGNOSTICS_CONTROLLER_UNVERIFIED', 'UNVERIFIED',
+      null, 0, null);
+    if (!directoryTrusted()) return observed(
+      'GUARDIAN_DIAGNOSTICS_DIRECTORY_UNVERIFIED', before,
       null, 0, null);
     let fd;
     let buffer, st0, st1, currentPath;
@@ -231,6 +305,10 @@ function validatePageRequest(options) {
         before, null, 0, null);
     }
 
+    if (!directoryTrusted()) {
+      return observed('GUARDIAN_DIAGNOSTICS_DIRECTORY_UNVERIFIED',
+        before, null, 0, null);
+    }
     const after = safeController(options.controller);
     if (after !== before) {
       return observed('GUARDIAN_DIAGNOSTICS_CONTROLLER_CHANGED_DURING_READ',
@@ -293,7 +371,55 @@ function validatePageRequest(options) {
       incident,
     });
   }
-  return Object.freeze({ inspect, recentEvents });
+
+  // Build a single bounded fault packet from the same protected read used
+  // by inspect() and recentEvents(). Never splice evidence from separate
+  // snapshots. This packet has a reproducible digest, not a signature or
+  // tamper-proof provenance claim; local Owner/Operator ACLs still matter.
+  function incidentEvidence(options = {}) {
+    const { eventId, expectedDigest } = validateEvidenceRequest(options);
+    const { observation, rows } = readSnapshot();
+    if (!rows) {
+      return evidenceEnvelope(observation,
+        'GUARDIAN_EVIDENCE_SOURCE_UNVERIFIED');
+    }
+    if (expectedDigest !== null &&
+        expectedDigest !== observation.journalSha256) {
+      return evidenceEnvelope(observation,
+        'GUARDIAN_EVIDENCE_SNAPSHOT_STALE');
+    }
+    const failureIndexes = [];
+    for (let index = 0; index < rows.length; index++) {
+      if (rows[index].state === 'FAILED') failureIndexes.push(index);
+    }
+    if (failureIndexes.length === 0) {
+      return evidenceEnvelope(observation,
+        'GUARDIAN_EVIDENCE_NO_RECORDED_FAILURE');
+    }
+    const index = eventId === null ?
+      failureIndexes[failureIndexes.length - 1] :
+      rows.findIndex((row) => row.eventId === eventId);
+    if (index < 0) {
+      return evidenceEnvelope(observation,
+        'GUARDIAN_EVIDENCE_EVENT_NOT_FOUND');
+    }
+    if (rows[index].state !== 'FAILED') {
+      return evidenceEnvelope(observation,
+        'GUARDIAN_EVIDENCE_EVENT_NOT_FAILURE');
+    }
+    return evidenceEnvelope(observation,
+      'GUARDIAN_EVIDENCE_FAULT_RECORDED', Object.freeze({
+        failureCount: failureIndexes.length,
+        eventSequence: index + 1,
+        selectedFailure: shortEvent(rows[index]),
+        previousReceipt: index > 0 ? shortEvent(rows[index - 1]) : null,
+        nextReceipt: index + 1 < rows.length ?
+          shortEvent(rows[index + 1]) : null,
+        firstFailure: shortEvent(rows[failureIndexes[0]]),
+        latestFailure: shortEvent(rows[failureIndexes[failureIndexes.length - 1]]),
+      }));
+  }
+  return Object.freeze({ inspect, recentEvents, incidentEvidence });
 }
 
 module.exports = { createGuardianLocalDiagnostics };

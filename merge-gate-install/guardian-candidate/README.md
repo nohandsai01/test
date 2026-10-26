@@ -988,3 +988,56 @@ SOURCE_ONLY_HOLD. Query input failures produce fixed nonsecret error codes.
 This is a local observer for an already owned child lifecycle only. It does
 not provide operator authentication, a daemon interface, a durable custody
 ledger, a trust anchor or production acceptance.
+
+
+## G19 — Immutable local fault evidence packet (source-only)
+
+A local Operator can now call incidentEvidence({ eventId, journalSha256 })
+on its read-only capability. Both fields are optional: an omitted event ID
+selects the latest FAILED receipt in the currently validated journal. An
+explicit event ID selects only that exact FAILED event, never silently
+substituting a newer one. The optional journalSha256 is an optimistic
+snapshot binding: if the bytes changed since the caller last observed them,
+the query returns UNAVAILABLE with zero selected receipt details. Invalid
+inputs (including object accessors, unexpected keys, symbols and unsafe
+Proxy traps) reject before touching the journal.
+
+One protected journal/controller read supplies the packet. It checks the
+same owner-only storage permissions, complete bounded JSONL, unique receipt
+IDs, duplicate JSON keys, file metadata stability, and controller state
+before/after as the prior inspect/recentEvents APIs. No second,
+potentially divergent file read is used to assemble the packet.
+
+The bounded fault packet contains only allowlisted terminal-receipt metadata:
+the selected failure's 1-based sequence, adjacent preceding/following
+receipts, first and last failure, failure count, total event count, current
+controller observation reason, SHA-256 of journal bytes and SHA-256 of the
+canonical returned packet fields (excluding its own evidenceSha256 field).
+The packet digest is deterministic for equivalent observations. No raw JSON,
+PID, App private key, bearer token, process env, error message, D1 payload,
+webhook content, arbitrary file path, credential or personal identifier is
+returned. The packet is frozen, read-only and bounded to five selected event
+metadata objects regardless of the journal length.
+
+If there is no FAILED event, an unrecognized event ID, a STOPPED event ID,
+a stale snapshot, a missing/corrupt/untrusted journal, or controller drift,
+the packet is UNAVAILABLE; it contains no selected event, digest or
+fault-context metadata and maintains manualInterventionRequired=true.
+A historical FAILED remains recorded and requires manual review even when
+subsequent process lifetimes append clean STOPPED receipts.
+
+authority=LOCAL_UNAUTHENTICATED_OBSERVATION is deliberate: SHA-256 is a
+comparison digest, NOT a signature, independent attestation, append-only
+storage proof, permission to restart, evidence of process liveness or Check
+release authority. A write-capable local adversary can replace the file and
+recompute the digest. No export/upload endpoint, automatic approval,
+acknowledge, reset, Check publication or hosted mapping is introduced.
+
+
+G19 hardening additionally rechecks the pinned evidence directory's inode,
+ownership and restricted mode on EACH observation, before and after reading
+its journal. A directory replaced or made writable by other users after
+the diagnostics constructor ran cannot silently result in a clean report.
+Controller status fields are taken once from ordinary own data properties,
+not accessors or unrecognized status fields; malformed/hostile status
+objects are unverified, never a basis for a clean stop or fault packet.
