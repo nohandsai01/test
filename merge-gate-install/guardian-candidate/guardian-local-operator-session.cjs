@@ -16,10 +16,12 @@ const { createGuardianLocalDiagnostics } =
   require('./guardian-local-diagnostics.cjs');
 const { createGuardianLocalEvidenceVerifier } =
   require('./guardian-local-evidence-verifier.cjs');
+const { createGuardianLocalHealthObservation } =
+  require('./guardian-local-health-observation.cjs');
 
 const FIELDS = new Set(['cwd', 'entrypoint', 'directory', 'fileName',
   'startupTimeoutMs', 'shutdownTimeoutMs', 'healthProbeTimeoutMs',
-  'maxJournalBytes']);
+  'maxJournalBytes', 'healthObservationMaxAgeMs']);
 
 function createGuardianLocalOperatorSession(options) {
   if (!options || typeof options !== 'object' ||
@@ -60,6 +62,12 @@ function createGuardianLocalOperatorSession(options) {
       { maxBytes: options.maxJournalBytes }),
   });
 
+  const healthObservation = createGuardianLocalHealthObservation({
+    controller,
+    ...(options.healthObservationMaxAgeMs === undefined ? {} :
+      { maxAgeMs: options.healthObservationMaxAgeMs }),
+  });
+
   // These two capabilities MUST NOT be composed into a single Operator
   // object. An Operator read cannot call start(), stop(), reset() or touch D1.
   const owner = Object.freeze({
@@ -74,7 +82,8 @@ function createGuardianLocalOperatorSession(options) {
     verifyIncidentEvidence: (packet) => evidenceVerifier.verify(packet),
     observeLocalContinuity: () => evidenceVerifier.observeContinuity(),
     faultTriage: () => diagnostics.faultTriage(),
-    probeRuntime: () => controller.probeRuntime(),
+    probeRuntime: () => healthObservation.probe(),
+    observeRuntimeHealth: () => healthObservation.observe(),
   });
   return Object.freeze({ owner, operator });
 }

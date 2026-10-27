@@ -1204,3 +1204,28 @@ as well as disposable synthetic children for stale, false, forged,
 unsolicited, extra-field, timeout, coalescence, stop-race and configuration
 boundary cases. No production listener, hosted D1, real GitHub App Check
 issuer, credential changes, Merge or Deploy are part of this feature.
+
+## G24 — Ephemeral local probe freshness & state drift (source-only)
+
+The existing Operator probeRuntime() remains an explicit, bounded IPC +
+loopback probe. Its result is now recorded by an inert, in-memory observation
+facade. Operator may additionally call observeRuntimeHealth() to inspect
+whether its own last successful probe is within a pinned, bounded monotonic
+age window (50–30000ms, default 1000ms). Passive observation does not send
+IPC, touch the journal, issue Check, start/stop or auto-retry the child.
+
+Freshness is not ongoing liveness. Even a recent snapshot reports
+liveness=NOT_PROVEN, SOURCE_ONLY_HOLD, manual intervention required,
+no restart, no activation and no release authority. It exposes only a
+timestamp, elapsed milliseconds and bounded reason, never PID, challenge,
+secret or raw payload. The snapshot expires monotonically and is invalidated
+on unexpected controller state, PID/error changes, rejected active probe or
+Owner stop. All sample state is volatile and cannot survive process restart
+as a bogus durable attestation. Invalid/proxy-like status or forged payload
+are rejected or sanitized fail-closed.
+
+Tests cover both a real isolated Protected Host child and deterministic
+negative scenarios for stale probe, state/PID drift, malformed response,
+probe failure, concurrent requests, read-only passive inspection and invalid
+configuration. No reviewer, production D1, GitHub App, Check issue, Merge,
+Deploy, permission change or credentials are part of this batch.
