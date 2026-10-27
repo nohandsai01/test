@@ -186,3 +186,45 @@ tamperproof audit chain. Same-UID compromise and filesystem attacks are
 outside the local-source proof. Every output remains SOURCE_ONLY_HOLD,
 custodyVerified=false, liveness=NOT_PROVEN, activationAllowed=false,
 automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED.
+
+
+## G27F — read-only casework journal integrity and unknown-lock diagnostics
+
+guardian-local-casework-diagnostics.cjs exposes exactly one inert
+createGuardianCaseworkDiagnostics({directory,fileName,maxJournalBytes?})
+factory and one passive inspect() method. Neither import, construction
+nor inspection creates files, writes bytes, acquires/releases a lock,
+repairs or truncates the journal, reads sensitive lock contents, starts
+processes or contacts hosted services.
+
+- Reopens the existing owner-only casework journal using O_RDONLY and
+  O_NOFOLLOW. Bounded complete reads cross-check descriptor/path
+  device+inode, size, timestamps, file permissions, link count and
+  directory identity before returning a SHA-256 of the local bytes.
+- Every JSONL record is parsed with duplicate-member detection. The
+  inspection validates all fixed receipt fields, event-ID uniqueness,
+  deduplication against the first quarantined digest, handoff-to-original
+  relationships and REQUESTED/ACKNOWLEDGED/RETURNED transition ordering.
+  Only aggregate counts and the local journal hash are returned; not raw
+  events, receipt IDs, reasons, file locations, credentials or messages.
+- Separately reads only lock file metadata before and after the journal
+  snapshot. A valid pre-existing lock is LOCK_PRESENT_UNVERIFIED,
+  regardless of age. Lock symlinks/hardlinks/unsafe file modes become
+  LOCK_UNSAFE. Lock creation, replacement or removal during a read
+  produces CHANGED_DURING_READ. Neither absent lock nor valid journal
+  makes the reader entitled to create or remove a lock.
+- Truncated JSON, duplicate keys, altered event IDs, wrong dedup origin,
+  unsupported transitions, unsafe file modes/links, oversized or partial
+  journal, directory drift and races produce NOT_VERIFIED/SOURCE_ONLY_HOLD.
+  Even a structurally consistent journal with no observed lock remains
+  LOCAL_STRUCTURE_OBSERVED_ONLY, liveness NOT_PROVEN and custodyVerified
+  false. No assertion of authorized human action or release readiness.
+- This is NOT durable trusted provenance or a production lock recovery
+  mechanism. No PID/age heuristic auto-unlocks: a live writer and an
+  orphaned lock cannot be distinguished from lock metadata alone.
+
+Tests cover disposable real owner-only casework journals, incoming
+duplicates, handoff transitions, synthetic corruption, unsafe links and
+permissions, simulated lock replacement during read, and byte-for-byte
+nonmutation of journal and lock. No Claude G27–G30 process-generation,
+IPC, Check writer or live D1 code is modified.
