@@ -96,7 +96,7 @@ test('import/construction inert; missing casework journal and no lock remain unt
     const before=snapshot(f.intake);
     const d=f.diag();
     assert.ok(Object.isFrozen(d));
-    assert.deepEqual(Object.keys(d),['inspect']);
+    assert.deepEqual(Object.keys(d),['inspect','inspectQuarantinedReceipt']);
     noChanges(before,snapshot(f.intake));
     const observation=d.inspect();
     hold(observation);

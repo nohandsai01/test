@@ -36,6 +36,8 @@ const { createGuardianCaseworkDiagnostics } =
   require('./guardian-local-casework-diagnostics.cjs');
 const { createGuardianCaseworkGenerationAssessment } =
   require('./guardian-local-casework-generation-assessment.cjs');
+const { createGuardianCaseworkGenerationPinAssessment } =
+  require('./guardian-local-casework-generation-pin.cjs');
 
 const FIELDS = new Set(['cwd', 'entrypoint', 'directory', 'fileName',
   'startupTimeoutMs', 'shutdownTimeoutMs', 'healthProbeTimeoutMs',
@@ -144,15 +146,25 @@ function createGuardianLocalOperatorSession(options) {
   const completeLedgerAudit = createGuardianLocalLedgerAudit({
     operator: readOnlyCore, pageSize: 50, maxCaptureMs: 5000,
   });
-  const caseworkAssessment = options.caseworkDirectory === undefined ? null :
+  const caseworkDiagnostics = options.caseworkDirectory === undefined ? null :
+    createGuardianCaseworkDiagnostics({
+      directory:options.caseworkDirectory,fileName:options.caseworkFileName,
+    });
+  const caseworkAssessment = caseworkDiagnostics === null ? null :
     createGuardianCaseworkGenerationAssessment({
-      caseworkDiagnostics:createGuardianCaseworkDiagnostics({
-        directory:options.caseworkDirectory,fileName:options.caseworkFileName,
-      }),
+      caseworkDiagnostics,
       operator:Object.freeze({
         assessRuntime:readOnlyCore.assessRuntime,
         captureOfflineIncidentBrief:()=>offlineBrief.capture(),
         auditCompleteEventLedger:()=>completeLedgerAudit.capture(),
+      }),
+    });
+  const caseworkPinAssessment = caseworkAssessment === null ? null :
+    createGuardianCaseworkGenerationPinAssessment({
+      caseworkDiagnostics,correlation:caseworkAssessment,
+      operator:Object.freeze({
+        incidentEvidence:readOnlyCore.incidentEvidence,
+        verifyIncidentEvidence:readOnlyCore.verifyIncidentEvidence,
       }),
     });
   const operator = Object.freeze({
@@ -161,6 +173,7 @@ function createGuardianLocalOperatorSession(options) {
     auditCompleteEventLedger: () => completeLedgerAudit.capture(),
     ...(caseworkAssessment ? {
       assessCaseworkGenerationEvidence:()=>caseworkAssessment.assess(),
+      assessCaseworkGenerationPin:(claim)=>caseworkPinAssessment.assess(claim),
     } : {}),
   });
   return Object.freeze({ owner, operator });

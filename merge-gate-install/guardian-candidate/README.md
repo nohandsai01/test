@@ -1620,3 +1620,35 @@ in-memory hashes. A new writer gets a new local baseline. Every response
 remains SOURCE_ONLY_HOLD; no Check issuance, activation, D1, credential,
 Ruleset, deployment or automatic repair occurs. Independent non-author QA
 is deferred until a stable integration batch.
+
+### G41 — Casework V2 local Generation evidence pin (source-only HOLD)
+
+When both Casework paths are owner-pinned, the Operator exposes
+\`assessCaseworkGenerationPin(claim)\`. The caller supplies one strict V2
+\`GUARDIAN_CASEWORK_GENERATION_CLAIM_V2\`: schemaVersion, kind, caseworkReceiptId
+(UUID), bundleSha256, caseworkJournalSha256, terminalEventId (UUID),
+generationId (32 lowercase hex), terminalJournalSha256, launchLedgerSha256,
+and claimSha256. The final SHA-256 covers the JSON serialization of the
+preceding fields in precisely that order. Extra fields, getters, inherited
+properties and malformed identifiers are rejected without echoing inputs.
+
+This is **not** a signer certificate or an automatically minted binding.
+The claim is external/untrusted. To return only
+\`LOCAL_UNTRUSTED_MANIFEST_PINS_MATCH_ONLY\`, the diagnostic re-reads the
+protected Casework JSONL twice, requiring the nominated V1 intake to be
+\`QUARANTINED\`, with matching digest and absent lock. It independently
+requires two complete G38 journal correlations and two Generation V2 fault
+packets, each checked with the existing local evidence verifier against
+the protected terminal and generation-launch journals. All pinned digest,
+UUID, generation, event and aggregate fields must match across reads.
+Failure is P0 / NOT_VERIFIED, with no recovery or fallback to legacy V1
+events; success is P1, never authority or custody.
+
+The V1 receipt schema/writer remain unchanged; the V2 claim is merely
+a local **association assertion**, not a record written to an immutable
+third-party log. Someone who can forge/replace the manifest or the
+entire historical local journals can construct a coincident match; the
+checksum does not authenticate their identity or establish causality.
+Two-point observations cannot exclude a fast ABA mutation. No signing keys,
+background processes, network, D1, Check publication, HOLD release, Merge
+or Deploy are part of this isolated source batch.
