@@ -12,10 +12,13 @@ const { createGuardianLocalOperatorSession } =
   require('../merge-gate-install/guardian-candidate/guardian-local-operator-session.cjs');
 
 const worker = path.join(__dirname, 'guardian-protected-worker-child.cjs');
+// G28: synthetic controller generation (identity is NOT the PID).
+const GENERATION = 'c'.repeat(32);
 
-function controllerStatus(state = 'RUNNING', pid = 2222) {
+function controllerStatus(state = 'RUNNING', pid = 2222,
+  generationId = GENERATION) {
   return {
-    state, pid, errorCode: null,
+    state, pid, errorCode: null, generationId,
     activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
     automaticRestartAllowed: false,
   };
@@ -25,7 +28,8 @@ function successfulProbe() {
     schemaVersion: 1, status: 'SOURCE_ONLY_HOLD',
     observation: 'LOCAL_CHILD_HEALTH_VERIFIED',
     reason: 'GUARDIAN_CHILD_HEALTH_VERIFIED',
-    processState: 'RUNNING', liveness: 'LOCAL_IPC_AND_LOOPBACK_ONLY',
+    processState: 'RUNNING', generationId: GENERATION,
+    liveness: 'LOCAL_IPC_AND_LOOPBACK_ONLY',
     manualInterventionRequired: true, activationAllowed: false,
     releaseAuthority: 'NOT_ISSUED', automaticRestartAllowed: false,
   });
@@ -34,7 +38,8 @@ function failedProbe() {
   return Object.freeze({
     schemaVersion: 1, status: 'SOURCE_ONLY_HOLD',
     observation: 'NOT_PROVEN', reason: 'GUARDIAN_CHILD_HEALTH_UNVERIFIED',
-    processState: 'RUNNING', liveness: 'NOT_PROVEN',
+    processState: 'RUNNING', generationId: GENERATION,
+    liveness: 'NOT_PROVEN',
     manualInterventionRequired: true, activationAllowed: false,
     releaseAuthority: 'NOT_ISSUED', automaticRestartAllowed: false,
   });
@@ -275,7 +280,7 @@ test('real Protected Host: probe is sampled then invalidated after Owner stop', 
     hold(after);
     assert.equal(after.freshness, 'UNVERIFIED');
     assert.equal(after.reason, 'GUARDIAN_HEALTH_CHILD_NOT_RUNNING');
-    assert.equal(fs.readdirSync(directory).length, 1);
+    assert.equal(fs.readdirSync(directory).length, 2); // journal + generation ledger
     assert.equal((await session.operator.probeRuntime()).observation, 'NOT_PROVEN');
   });
 });

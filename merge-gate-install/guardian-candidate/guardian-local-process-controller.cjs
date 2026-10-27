@@ -7,6 +7,12 @@
  * A child reports READY/TERMINAL over its private IPC channel. This is a
  * lifecycle receipt from the owned child, NOT an authorization assertion:
  * the actual Protected Host is still responsible for all preflight gates.
+ *
+ * G27: every start() issues one fresh, never-reused process generation.
+ * The optional synchronous onLaunch callback must durably record it BEFORE
+ * spawn. The child learns it only via HELLO -> BIND over private IPC and
+ * every later READY/HEALTH_RESULT/TERMINAL frame must carry the same value.
+ * A PID is an OS handle that can be reused; the generation is the identity.
  */
 'use strict';
 
@@ -15,11 +21,15 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const PROTOCOL = 'NOHANDS_GUARDIAN_CHILD_V1';
+const PROTOCOL = 'NOHANDS_GUARDIAN_CHILD_V2';
 const ALLOWED = new Set(['entrypoint', 'cwd', 'startupTimeoutMs',
-  'shutdownTimeoutMs', 'healthProbeTimeoutMs', 'onTerminal']);
+  'shutdownTimeoutMs', 'healthProbeTimeoutMs', 'onTerminal', 'onLaunch']);
 const MIN_WAIT = 50;
 const MAX_WAIT = 30_000;
+const GENERATION = /^[0-9a-f]{32}$/;
+// In-process uniqueness guard on top of 128 random bits. Durable reuse
+// across parent restarts is detected by the owner generation ledger.
+const issuedGenerations = new Set();
 
 class GuardianChildControllerError extends Error {
   constructor(code) {
@@ -58,25 +68,46 @@ function validatedEntrypoint(name, directory) {
       size: info.size, sha256: digest });
   } catch (_) { return null; }
 }
-function makeReceipt(state, code) {
+function makeReceipt(state, code, generationId) {
   return Object.freeze({
     state, errorCode: code,
     hostStopped: state === 'STOPPED',
     activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
     automaticRestartAllowed: false,
+    generationId,
   });
 }
+function newGeneration() {
+  for (;;) {
+    const id = crypto.randomBytes(16).toString('hex');
+    if (!issuedGenerations.has(id)) {
+      issuedGenerations.add(id);
+      return id;
+    }
+  }
+}
+// Frame classifiers check SHAPE only. A well-formed frame carrying another
+// generation is a distinct, stronger failure than a malformed frame.
+function helloFrame(value) {
+  return ownShape(value, ['protocol', 'event', 'activationAllowed',
+    'releaseAuthority']) &&
+    value.protocol === PROTOCOL && value.event === 'HELLO' &&
+    value.activationAllowed === false &&
+    value.releaseAuthority === 'NOT_ISSUED';
+}
 function readyFrame(value) {
-  return ownShape(value, ['protocol', 'event', 'state',
+  return ownShape(value, ['protocol', 'event', 'generation', 'state',
     'activationAllowed', 'releaseAuthority']) &&
     value.protocol === PROTOCOL && value.event === 'READY' &&
+    typeof value.generation === 'string' &&
     value.state === 'RUNNING' && value.activationAllowed === false &&
     value.releaseAuthority === 'NOT_ISSUED';
 }
 function healthFrame(value) {
-  return ownShape(value, ['protocol', 'event', 'challenge', 'healthy',
-    'activationAllowed', 'releaseAuthority']) &&
+  return ownShape(value, ['protocol', 'event', 'generation', 'challenge',
+    'healthy', 'activationAllowed', 'releaseAuthority']) &&
     value.protocol === PROTOCOL && value.event === 'HEALTH_RESULT' &&
+    typeof value.generation === 'string' &&
     typeof value.challenge === 'string' &&
     /^[0-9a-f]{32}$/.test(value.challenge) &&
     typeof value.healthy === 'boolean' &&
@@ -84,9 +115,10 @@ function healthFrame(value) {
     value.releaseAuthority === 'NOT_ISSUED';
 }
 function terminalFrame(value) {
-  return ownShape(value, ['protocol', 'event', 'state', 'hostStopped',
-    'activationAllowed', 'releaseAuthority']) &&
+  return ownShape(value, ['protocol', 'event', 'generation', 'state',
+    'hostStopped', 'activationAllowed', 'releaseAuthority']) &&
     value.protocol === PROTOCOL && value.event === 'TERMINAL' &&
+    typeof value.generation === 'string' &&
     value.state === 'STOPPED' && value.hostStopped === true &&
     value.activationAllowed === false &&
     value.releaseAuthority === 'NOT_ISSUED';
@@ -102,7 +134,9 @@ function createGuardianLocalProcessController(options) {
   if (!object(options) || Object.keys(options).some((x) => !ALLOWED.has(x)) ||
       typeof options.cwd !== 'string' || !path.isAbsolute(options.cwd) ||
       typeof options.entrypoint !== 'string' ||
-      typeof options.onTerminal !== 'function') {
+      typeof options.onTerminal !== 'function' ||
+      (options.onLaunch !== undefined &&
+        typeof options.onLaunch !== 'function')) {
     throw new GuardianChildControllerError('GUARDIAN_CHILD_CONFIG_INVALID');
   }
   let canonicalCwd;
@@ -129,12 +163,16 @@ function createGuardianLocalProcessController(options) {
   let failure = null, notified = false, startPromise = null, stopPromise = null;
   let faultKillTimer = null;
   let probe = null, expiredChallenge = null, probeBlocked = false;
+  // generation is assigned exactly once per controller, at start(); bound
+  // becomes true only after BIND was handed to the owned child's IPC.
+  let generation = null, bound = false;
   let settleStart, rejectStart, settleExit;
   const exited = new Promise((resolve) => { settleExit = resolve; });
   function stateView() {
     return Object.freeze({
       state, errorCode: failure,
       pid: child?.pid ?? null,
+      generationId: generation,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
       automaticRestartAllowed: false,
     });
@@ -145,6 +183,7 @@ function createGuardianLocalProcessController(options) {
       observation: healthy ? 'LOCAL_CHILD_HEALTH_VERIFIED' : 'NOT_PROVEN',
       reason,
       processState: state,
+      generationId: generation,
       liveness: healthy ? 'LOCAL_IPC_AND_LOOPBACK_ONLY' : 'NOT_PROVEN',
       manualInterventionRequired: true,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
@@ -166,7 +205,7 @@ function createGuardianLocalProcessController(options) {
     state = stateName;
     failure = code ?? null;
     notified = true;
-    const receipt = makeReceipt(state, failure);
+    const receipt = makeReceipt(state, failure, generation);
     try {
       const value = options.onTerminal(receipt);
       if (value && typeof value.then === 'function') {
@@ -204,7 +243,38 @@ function createGuardianLocalProcessController(options) {
     }
     finish('FAILED', code);
   }
+  function onHello() {
+    // Exactly one HELLO, only while starting, answered with the generation
+    // this parent issued. Nothing in the child's frame selects the value.
+    if (bound || gotReady || state !== 'STARTING' || expectedExit) {
+      fail('GUARDIAN_CHILD_PROTOCOL_INVALID');
+      return;
+    }
+    bound = true;
+    try {
+      child.send({
+        protocol: PROTOCOL, event: 'BIND', generation,
+        activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
+      }, (error) => { if (error) fail('GUARDIAN_CHILD_BIND_IPC_FAILED'); });
+    } catch (_) {
+      fail('GUARDIAN_CHILD_BIND_IPC_FAILED');
+    }
+  }
   function onMessage(payload) {
+    if (helloFrame(payload)) {
+      onHello();
+      return;
+    }
+    // Every post-BIND frame is bound to this controller's generation. A
+    // frame for another (older or forged) generation is never reinterpreted,
+    // even as an ignorable late probe reply: it is fail-closed.
+    if ((readyFrame(payload) || healthFrame(payload) ||
+         terminalFrame(payload)) &&
+        (!bound || payload.generation !== generation)) {
+      fail(bound ? 'GUARDIAN_CHILD_GENERATION_MISMATCH' :
+        'GUARDIAN_CHILD_PROTOCOL_INVALID');
+      return;
+    }
     // Child health results are valid only for a current owner-generated
     // random challenge. A delayed reply to one expired request is ignored;
     // all unsolicited or malformed frames are protocol violations.
@@ -274,7 +344,25 @@ function createGuardianLocalProcessController(options) {
       settleStart = resolve;
       rejectStart = reject;
     });
+    generation = newGeneration();
     try {
+      // Durable launch evidence precedes the child. If it cannot be
+      // recorded synchronously, no process is spawned for this generation.
+      if (options.onLaunch) {
+        let value;
+        try {
+          value = options.onLaunch(Object.freeze({ generationId: generation,
+            activationAllowed: false, releaseAuthority: 'NOT_ISSUED' }));
+        } catch (_) {
+          throw new GuardianChildControllerError(
+            'GUARDIAN_CHILD_LAUNCH_RECORD_FAILED');
+        }
+        if (value && typeof value.then === 'function') {
+          Promise.resolve(value).catch(() => {});
+          throw new GuardianChildControllerError(
+            'GUARDIAN_CHILD_LAUNCH_RECORD_FAILED');
+        }
+      }
       // Reject changed files between inert construction and explicit start.
       // A production owner must additionally pin the executable to a trusted
       // immutable build artifact; no source file is selected from PR input.
@@ -342,7 +430,7 @@ function createGuardianLocalProcessController(options) {
     }, healthProbeMs);
     try {
       child.send({
-        protocol: PROTOCOL, event: 'HEALTH_PROBE', challenge,
+        protocol: PROTOCOL, event: 'HEALTH_PROBE', generation, challenge,
         activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
       }, (error) => {
         if (error && probe === current) {
@@ -398,4 +486,5 @@ function createGuardianLocalProcessController(options) {
 }
 
 module.exports = { createGuardianLocalProcessController,
-  GuardianChildControllerError };
+  GuardianChildControllerError, GUARDIAN_CHILD_PROTOCOL: PROTOCOL,
+  GUARDIAN_GENERATION_PATTERN: GENERATION };
