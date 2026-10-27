@@ -1366,3 +1366,14 @@ These samples are not an atomic filesystem transaction. A change-and-restore
 (ABA) between reads, a compromised Controller, a malicious writer controlling
 both journals, or a subsequent ENOSPC can escape detection. P3 never releases
 HOLD. Independent non-author QA and production acceptance remain separate.
+
+## G35A — PR #18 journal-identity integration and in-place continuity (OFF)
+
+On the isolated PR #24 terminal/storage candidate, import PR #18's protected
+receipt writer/tests without modifying PR #18. Add an in-memory SHA-256 and
+exact byte-size continuity high-watermark to reject complete-line truncation,
+same-inode same-size modification, or unexpected external append after a
+successful write. The pre-append prefix is rechecked after fsync. Detected
+drift fails closed without repair, rotation, deletion or release authority.
+New writer instances cannot attest preexisting history; cross-process TOCTOU
+races remain. No signed witness, cross-process lock or Check authority added.
