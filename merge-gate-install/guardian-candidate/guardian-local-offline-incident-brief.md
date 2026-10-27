@@ -281,3 +281,20 @@ by the Observer. This does not eliminate ABA/races between observations.
 
 Source only; Feature OFF; Launch HOLD; no Merge, Deploy, real Check,
 credentials, trusted anchor enrollment or production D1.
+
+## G39 — source-only cross-source aggregate contract hardening
+
+The G38 opt-in Operator correlation now rejects an externally supplied brief
+with a forged non-leading terminal event, a duplicate event ID, a sparse or
+accessor-backed event slot, or a digest computed over unvalidated nested data.
+Events are copied into plain descriptors before the brief SHA-256 comparison,
+and UTC timestamps must round-trip exactly rather than normalize impossible
+calendar dates. The separate complete-ledger audit aggregate must have valid,
+distinct failure code rows whose totals match the counted failures, and
+first/latest failures must match the summary and last-terminal relationship.
+Malformed aggregates return P0/NOT_VERIFIED without exposing raw fields.
+
+This is local structural validation, **not** a trusted casework-to-generation
+transaction binding. Casework V1 still has no Generation V2 ledger digest.
+Both binding fields remain NOT_PROVEN; all paths retain SOURCE_ONLY_HOLD.
+No writer, IPC, credentials, Check or production pathway was added.
