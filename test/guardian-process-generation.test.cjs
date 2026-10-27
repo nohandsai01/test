@@ -639,3 +639,47 @@ test('G29: the Operator facade stays read-only and observing never mutates evide
     assert.deepEqual([digest(FILE), digest(generationLedgerName(FILE))], before);
   });
 });
+
+test('G30: concurrent start() on one Controller launches exactly one generation', async () => {
+  await temp(async (directory) => {
+    const { ctrl, seen, launches } = controller(fixture(directory, 'normal'));
+    const results = await Promise.allSettled([ctrl.start(), ctrl.start(), ctrl.start()]);
+    const ok = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    assert.equal(ok.length, 1);
+    assert.equal(rejected.length, 2);
+    rejected.forEach((r) => assert.equal(r.reason.code, 'GUARDIAN_CHILD_STATE_INVALID'));
+    assert.equal(launches.length, 1);
+    assert.equal(ok[0].value.generationId, launches[0].generationId);
+    assert.equal((await ctrl.stop()).state, 'STOPPED');
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].generationId, launches[0].generationId);
+  });
+});
+
+test('G30: stop() racing startup before BIND never binds, never RUNNING, and records that generation as FAILED', async () => {
+  await temp(async (directory) => {
+    const entrypoint = fixture(directory, 'normal');
+    const session = createGuardianLocalOperatorSession({
+      directory, fileName: FILE, cwd: directory, entrypoint,
+      startupTimeoutMs: 2000, shutdownTimeoutMs: 400,
+    });
+    const starting = session.owner.start().then(
+      (value) => ({ value }), (error) => ({ code: error.code }));
+    const final = await session.owner.stop();
+    const outcome = await starting;
+    assert.equal(outcome.value, undefined);
+    assert.ok(outcome.code);
+    assert.equal(final.state, 'FAILED');
+    const [launched] = journalRows(directory, generationLedgerName(FILE));
+    const rows = journalRows(directory);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].state, 'FAILED');
+    assert.equal(rows[0].generationId, launched.generationId);
+    const triage = session.operator.faultTriage();
+    assert.equal(triage.priority, 'P1');
+    assert.equal(triage.classification, 'RECORDED_FAILURE');
+    assert.equal(triage.unterminatedGenerations, 0);
+    assertHold(triage);
+  });
+});
