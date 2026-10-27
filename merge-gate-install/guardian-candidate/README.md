@@ -1294,3 +1294,49 @@ read, append a real protected receipt, vary the mid-snapshot PID, poison
 the second read with exceptions/getters, and expire a RECENT observation
 while the second read is delayed. No reviewer or production activation
 is performed mid-batch.
+
+## G27–G30 — durable process generation identity and crash evidence (source-only)
+
+Every Controller start() issues one fresh 128-bit process generation that
+is never reused in-process. When the Owner session wires `onLaunch`, the
+generation is appended synchronously to an owner-only, append-only ledger
+(`<journal>.generations.jsonl`) BEFORE the child is spawned; a ledger
+failure refuses the spawn (GUARDIAN_CHILD_LAUNCH_RECORD_FAILED). A PID is
+an OS handle that may be reused; the generation is the identity.
+
+The child IPC protocol is NOHANDS_GUARDIAN_CHILD_V2. After its local health
+check the child sends HELLO; the parent answers one BIND carrying the
+generation it issued, and the child accepts only the first BIND. READY,
+HEALTH_PROBE, HEALTH_RESULT and TERMINAL all carry that generation. A
+well-formed frame for another generation fails closed with
+GUARDIAN_CHILD_GENERATION_MISMATCH; READY before BIND, a second HELLO or a
+replayed (already answered) health result is GUARDIAN_CHILD_PROTOCOL_INVALID.
+A child never answers a probe for a foreign generation.
+
+Terminal receipts produced by the Controller are written as schemaVersion 2
+with `generationId`; legacy schemaVersion 1 receipts stay readable but can
+never close a launched generation. Diagnostics joins journal and ledger:
+
+- a launched generation without a terminal receipt — other than the
+  Controller's own still-live generation — is P1 UNTERMINATED_GENERATION
+  (OWNER_RECONCILE_INTERRUPTED_GENERATION). Later clean generations never
+  clear it; only owner-side reconciliation outside this source can;
+- a duplicate terminal (replay), a terminal for an unknown generation, a
+  reused ledger generation, a bound receipt without any ledger, a live
+  Controller generation absent from the ledger or a corrupted ledger is P0;
+- a Controller generation that changes during a read is rejected, as is a
+  change of state/PID/errorCode (G26 bracketing is preserved).
+
+Health samples and runtime-assessment status brackets compare generation as
+well as PID, so a reused PID cannot make an old sample or snapshot describe
+a new process. Concurrent Owner sessions sharing one journal see each
+other's live generations as unterminated (fail-closed HOLD) until all stop.
+
+Limits: journal and ledger are local, unauthenticated evidence. Deleting
+BOTH files is indistinguishable from a fresh baseline; incident evidence
+packets keep their G19 format and do not carry the generation. All results
+remain liveness=NOT_PROVEN, activationAllowed=false,
+releaseAuthority=NOT_ISSUED, automaticRestartAllowed=false and
+SOURCE_ONLY_HOLD. Negative tests include a real parent SIGKILL, PID reuse,
+foreign/unbound/rebind frames, replayed health results, start/stop races
+and concurrent sessions.
