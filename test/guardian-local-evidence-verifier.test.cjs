@@ -327,7 +327,7 @@ test('operator facade exposes verification only, preserves strict separation fro
     assert.deepEqual(Object.keys(session.operator).sort(), [
       'inspect', 'recentEvents', 'incidentEvidence',
       'verifyIncidentEvidence', 'observeLocalContinuity', 'faultTriage',
-      'probeRuntime', 'observeRuntimeHealth', 'assessRuntime', 'diagnoseTerminalPersistence',
+      'probeRuntime', 'observeRuntimeHealth', 'assessRuntime', 'diagnoseTerminalPersistence', 'assessJournalBudget',
     ].sort());
     assert.deepEqual(Object.keys(session.owner).sort(),
       ['start', 'status', 'stop']);
