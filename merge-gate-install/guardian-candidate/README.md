@@ -1294,3 +1294,21 @@ read, append a real protected receipt, vary the mid-snapshot PID, poison
 the second read with exceptions/getters, and expire a RECENT observation
 while the second read is delayed. No reviewer or production activation
 is performed mid-batch.
+
+
+## G28A — local receipt journal identity hardening (isolated, OFF)
+
+The existing terminal receipt writer now rechecks its owner-only directory inode,
+the configured directory alias, and the journal's pathname/fd identity at each
+append. Journals with multiple hard links, unsafe permission drift, non-regular
+targets, or a truncated final JSONL line fail closed. After this writer instance
+has successfully appended, deleting or replacing that file cannot reset its
+in-memory identity anchor. A post-fsync stat check rejects observable path or
+size races. Rejected appends never repair, unlink, rotate, or truncate evidence.
+
+This is **not** an atomic cross-process lock, a persistent provenance witness,
+a journal signature, or proof of crash-durable directory entries. Concurrent
+malicious filesystem mutation between non-atomic metadata checks can still
+escape detection; a file replaced *before the first append of a new writer*
+has no prior identity anchor. On any storage ambiguity, the parent/controller
+must retain manual HOLD rather than claim a clean STOPPED or release authority.
