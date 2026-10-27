@@ -1577,3 +1577,25 @@ only JSONL records, forged or changed signed fields, invalid pin,
 wrong anchor, sequence replay, malformed nested JSON, symlink/hardlink
 or permission defects, ledger corruption and in-flight changes.
 No real trusted anchor, payment, Merge, Deploy, Check or app mutation.
+
+## G36A — generation V2 / protected receipt-writer integration (source-only)
+
+An isolated branch layers the existing PR #19/#20 generation protocol,
+paired journal diagnostics and external baseline verification onto PR #25's
+G35A in-memory byte-continuity writer. Both the receipt JSONL file and the
+derived generation-launch JSONL file now receive the same guarded, bounded,
+synchronous append protections. The launch ledger is no longer a weaker
+O_WRONLY writer: inode/path identity, directory ownership, link count,
+private file modes, valid trailing line, exact committed byte count and
+SHA-256 continuity are rechecked on future appends and after fsync.
+It refuses detectable same-inode rewrites, complete-line truncation,
+replacement, symlink/hardlink substitution and unexpected external appends.
+
+The preexisting V2 generation-bound receipt format, local READY witness,
+paired offline diagnostics and explicit HOLD are preserved; legacy v1
+receipts remain historical-only. Tests directly exercise both streams.
+A new instance cannot prove prior contents; this is neither an atomic
+multi-process lock nor signed custody proof. Concurrent writers to one
+ledger may fail closed on observed drift rather than silently extending
+one another's local snapshots. No Check, restart, release or production
+authority is introduced. PR #15 and other Writers' branches are unchanged.

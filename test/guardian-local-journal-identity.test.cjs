@@ -43,7 +43,7 @@ test('G28A construction inert; owner journal writes two append-only terminal rec
   sandbox(({directory,target})=>{
     const j=writer(directory);
     assert.equal(fs.existsSync(target),false);
-    assert.deepEqual(Object.keys(j),['append']);
+    assert.deepEqual(Object.keys(j),['append','recordLaunch','recordReady']);
     assert.ok(Object.isFrozen(j));
     assert.equal(j.append(SUCCESS).releaseAuthority,'NOT_ISSUED');
     const before=fs.readFileSync(target);
