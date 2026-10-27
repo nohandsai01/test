@@ -28,6 +28,10 @@ const { createGuardianLocalStoragePressure } =
   require('./guardian-local-storage-pressure.cjs');
 const { createGuardianLocalTerminalStorageCorrelation } =
   require('./guardian-local-terminal-storage-correlation.cjs');
+const { createGuardianOfflineIncidentBrief } =
+  require('./guardian-local-offline-incident-brief.cjs');
+const { createGuardianLocalLedgerAudit } =
+  require('./guardian-local-event-ledger-audit.cjs');
 
 const FIELDS = new Set(['cwd', 'entrypoint', 'directory', 'fileName',
   'startupTimeoutMs', 'shutdownTimeoutMs', 'healthProbeTimeoutMs',
@@ -107,7 +111,7 @@ function createGuardianLocalOperatorSession(options) {
     stop: () => controller.stop(),
     status: () => controller.status(),
   });
-  const operator = Object.freeze({
+  const readOnlyCore = Object.freeze({
     inspect: () => diagnostics.inspect(),
     recentEvents: (options) => diagnostics.recentEvents(options),
     incidentEvidence: (options) => diagnostics.incidentEvidence(options),
@@ -121,6 +125,20 @@ function createGuardianLocalOperatorSession(options) {
     assessJournalBudget: () => journalBudget.assess(),
     assessJournalStorage: () => storagePressure.assess(),
     assessTerminalStorage: () => terminalStorageCorrelation.assess(),
+  });
+  // G37 integrates independent existing offline consumers only AFTER the
+  // Generation V2 journal+ledger protected read contract is installed.
+  // Construction is inert; no capture, child control or disk write here.
+  const offlineBrief = createGuardianOfflineIncidentBrief({
+    operator: readOnlyCore, limit: 5, maxCaptureMs: 1000,
+  });
+  const completeLedgerAudit = createGuardianLocalLedgerAudit({
+    operator: readOnlyCore, pageSize: 50, maxCaptureMs: 5000,
+  });
+  const operator = Object.freeze({
+    ...readOnlyCore,
+    captureOfflineIncidentBrief: () => offlineBrief.capture(),
+    auditCompleteEventLedger: () => completeLedgerAudit.capture(),
   });
   return Object.freeze({ owner, operator });
 }

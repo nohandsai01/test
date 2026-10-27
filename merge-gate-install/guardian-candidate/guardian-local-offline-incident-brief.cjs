@@ -27,17 +27,20 @@ const ASSESSMENT_FIELDS = Object.freeze([
 const EVENT_FIELDS = Object.freeze(['eventId', 'timestamp', 'state', 'errorCode']);
 const KEYS = Object.freeze(['operator', 'limit', 'maxCaptureMs']);
 
-function exactData(value, names) {
+function exactData(value, names, optional = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   try {
     const proto = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) return null;
     const own = Reflect.ownKeys(value);
-    if (own.length !== names.length || own.some((key) =>
-        typeof key !== 'string' || !names.includes(key))) return null;
+    if (own.length < names.length ||
+        own.length > names.length + optional.length ||
+        own.some((key) => typeof key !== 'string' ||
+          !(names.includes(key) || optional.includes(key))) ||
+        names.some((key) => !own.includes(key))) return null;
     const descriptors = Object.getOwnPropertyDescriptors(value);
     const result = {};
-    for (const key of names) {
+    for (const key of own) {
       const d = descriptors[key];
       if (!d || !Object.hasOwn(d, 'value')) return null;
       Object.defineProperty(result, key, {
@@ -52,7 +55,10 @@ function reasonString(x, max = 110) {
     /^[A-Z][A-Z0-9_]*$/.test(x);
 }
 function validAssessment(value) {
-  const x = exactData(value, ASSESSMENT_FIELDS);
+  // G36's generation-aware runtime assessment has one extra strictly
+  // validated field. Preserve G27A's older v1 contract without accepting
+  // arbitrary or accessor-based metadata from either representation.
+  const x = exactData(value, ASSESSMENT_FIELDS, ['unterminatedGenerations']);
   if (!x || x.schemaVersion !== 1 ||
       x.kind !== 'GUARDIAN_LOCAL_RUNTIME_ASSESSMENT_V1' ||
       x.authority !== 'LOCAL_UNAUTHENTICATED_OBSERVATION' ||
@@ -75,6 +81,17 @@ function validAssessment(value) {
       !Number.isSafeInteger(x.historicalFailureCount) ||
       x.historicalFailureCount < 0 ||
       x.historicalFailureCount > x.journalEntries ||
+      (Object.hasOwn(x, 'unterminatedGenerations') &&
+        (!Number.isSafeInteger(x.unterminatedGenerations) ||
+          x.unterminatedGenerations < 0 ||
+          // Launches may be unterminated before ANY terminal receipt exists;
+          // journalEntries is therefore not an upper bound for this count.
+          x.unterminatedGenerations > 4096)) ||
+      (x.classification === 'UNTERMINATED_GENERATION' &&
+        (x.priority !== 'P1' ||
+          !Number.isSafeInteger(x.unterminatedGenerations) ||
+          x.unterminatedGenerations === 0)) ||
+      (x.priority === 'P3' && x.unterminatedGenerations > 0) ||
       x.liveness !== 'NOT_PROVEN' ||
       x.manualInterventionRequired !== (x.priority !== 'P3') ||
       x.automaticRestartAllowed !== false ||
@@ -173,7 +190,9 @@ function sameAssessment(a, b) {
     a.healthFreshness === b.healthFreshness &&
     a.journalSha256 === b.journalSha256 &&
     a.journalEntries === b.journalEntries &&
-    a.historicalFailureCount === b.historicalFailureCount;
+    a.historicalFailureCount === b.historicalFailureCount &&
+    (a.unterminatedGenerations ?? null) ===
+      (b.unterminatedGenerations ?? null);
 }
 function frozenReport(classification, input = null) {
   const incident = input && classification === 'LOCAL_BRIEF_CONSISTENT';

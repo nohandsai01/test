@@ -228,3 +228,26 @@ duplicates, handoff transitions, synthetic corruption, unsafe links and
 permissions, simulated lock replacement during read, and byte-for-byte
 nonmutation of journal and lock. No Claude G27–G30 process-generation,
 IPC, Check writer or live D1 code is modified.
+
+## G37 — Generation V2 Operator facade integration (source-only)
+
+G37 stacks the independently completed PR #16 offline casework modules and
+PR #17 complete event ledger audit on the G36 Generation V2 + protected
+journal pair. The local Operator facade exposes two **read-only** capabilities:
+
+- `captureOfflineIncidentBrief()` captures a small redacted local snapshot.
+  The extended runtime assessment's `unterminatedGenerations` is validated
+  and must remain equal across two observations. Original G27A v1 snapshots
+  remain accepted only as their exact legacy shape, without arbitrary fields.
+- `auditCompleteEventLedger()` audits up to 4096 cursor-paged terminal
+  receipts, rejecting incomplete or changing local snapshots. It does not
+  establish independent custody of the paired Generation V2 launch ledger.
+
+Both operations construct inertly, perform no process control or writes,
+and retain SOURCE_ONLY_HOLD, liveness NOT_PROVEN and NOT_ISSUED release
+authority. The offline casework/quarantine modules remain separate APIs;
+no casework directory, lock, account or real Check is created by the session.
+
+The pair is not an atomic OS transaction and the summaries are not signed
+attestations. Independent non-author QA is NOT_PROVEN. Source-only Draft:
+no Merge, Deploy, production D1, credential, Ruleset or payment action.

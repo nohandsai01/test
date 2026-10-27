@@ -231,7 +231,7 @@ test('Operator exposes bounded event query but never process control or failure 
       directory, fileName: 'guardian-events.jsonl',
       startupTimeoutMs: 4000, shutdownTimeoutMs: 600,
     });
-    assert.deepEqual(Object.keys(session.operator).sort(), ['assessJournalBudget', 'assessJournalStorage', 'assessRuntime', 'assessTerminalStorage', 'diagnoseTerminalPersistence', 'faultTriage', 'incidentEvidence', 'inspect', 'observeLocalContinuity', 'observeRuntimeHealth', 'probeRuntime', 'recentEvents', 'verifyIncidentEvidence']);
+    assert.deepEqual(Object.keys(session.operator).sort(), ['assessJournalBudget', 'assessJournalStorage', 'assessRuntime', 'assessTerminalStorage', 'auditCompleteEventLedger', 'captureOfflineIncidentBrief', 'diagnoseTerminalPersistence', 'faultTriage', 'incidentEvidence', 'inspect', 'observeLocalContinuity', 'observeRuntimeHealth', 'probeRuntime', 'recentEvents', 'verifyIncidentEvidence']);
     assert.ok(!Object.hasOwn(session.operator, 'start'));
     assert.ok(!Object.hasOwn(session.operator, 'stop'));
     assert.ok(!Object.hasOwn(session.operator, 'clear'));

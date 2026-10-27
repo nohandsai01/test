@@ -331,7 +331,7 @@ test('Operator can read exact incident but cannot acknowledge, clear, start, sto
       startupTimeoutMs: 1500, shutdownTimeoutMs: 500,
     });
     assert.deepEqual(Object.keys(broken.operator).sort(),
-      ['inspect', 'recentEvents', 'incidentEvidence', 'verifyIncidentEvidence', 'observeLocalContinuity', 'faultTriage', 'probeRuntime', 'observeRuntimeHealth', 'assessRuntime', 'diagnoseTerminalPersistence', 'assessJournalBudget', 'assessJournalStorage', 'assessTerminalStorage'].sort());
+      ['inspect', 'recentEvents', 'incidentEvidence', 'verifyIncidentEvidence', 'observeLocalContinuity', 'faultTriage', 'probeRuntime', 'observeRuntimeHealth', 'assessRuntime', 'diagnoseTerminalPersistence', 'assessJournalBudget', 'assessJournalStorage', 'assessTerminalStorage', 'auditCompleteEventLedger', 'captureOfflineIncidentBrief'].sort());
     assert.equal(Object.hasOwn(broken.operator, 'acknowledge'), false);
     assert.equal(Object.hasOwn(broken.operator, 'start'), false);
     assert.equal(Object.hasOwn(broken.operator, 'stop'), false);
