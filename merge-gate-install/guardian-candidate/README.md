@@ -1599,3 +1599,24 @@ multi-process lock nor signed custody proof. Concurrent writers to one
 ledger may fail closed on observed drift rather than silently extending
 one another's local snapshots. No Check, restart, release or production
 authority is introduced. PR #15 and other Writers' branches are unchanged.
+
+### G40 — Casework owner-writer byte continuity (source-only HOLD)
+
+The existing G27E passive Casework V1 receipt writer now maintains a volatile
+per-instance journal high-watermark from its first owner-protected observation.
+A subsequent owner write or read rejects changed bytes, timestamps, length,
+inode, deletion and replaced paths. It cannot re-create a previously witnessed
+journal. Each append re-reads the original bytes before writing, then after
+fsync independently checks the entire expected prefix plus new suffix
+and both descriptor/path identities. Partial or uncertain writes retain the
+owner-only lock for manual investigation; detected history discontinuities
+latch fail-closed within that writer instance. The receipt V1 format and
+Operator's read-only surface are unchanged.
+
+This is NOT Casework V2 / Generation V2 evidence binding. Historical
+modifications before the first observation, cross-process ABA races, and
+write-capable same-UID attackers are not independently attested by these
+in-memory hashes. A new writer gets a new local baseline. Every response
+remains SOURCE_ONLY_HOLD; no Check issuance, activation, D1, credential,
+Ruleset, deployment or automatic repair occurs. Independent non-author QA
+is deferred until a stable integration batch.

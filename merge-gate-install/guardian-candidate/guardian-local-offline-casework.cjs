@@ -206,8 +206,28 @@ function createGuardianOfflineCasework(options) {
   } catch (_) { throw new Error('GUARDIAN_CASEWORK_DIRECTORY_UNVERIFIED'); }
   const file = path.join(directory,config.fileName);
   const lockFile = file + '.lock';
-  const fdflags = fs.constants.O_RDWR|fs.constants.O_APPEND|fs.constants.O_CREAT|
+  const fdflags = fs.constants.O_RDWR | fs.constants.O_APPEND |
     (fs.constants.O_NOFOLLOW ?? 0);
+  // A single owner-held writer retains a volatile high-watermark after its
+  // first trusted read. A new process has no historical custody proof.
+  let witness = null, witnessBroken = false;
+  const META = ['dev','ino','size','mtimeMs','ctimeMs','mode','uid','nlink'];
+  function sameMetadata(a,b) {
+    return META.every(k => a[k] === b[k]);
+  }
+  function makeWitness(state) {
+    return Object.freeze({
+      dev:state.identity.dev, ino:state.identity.ino,
+      size:state.identity.size, sha:state.sha,
+      mtimeMs:state.identity.mtimeMs, ctimeMs:state.identity.ctimeMs,
+    });
+  }
+  function matchesWitness(state,old) {
+    return state.identity.dev === old.dev && state.identity.ino === old.ino &&
+      state.identity.size === old.size && state.sha === old.sha &&
+      state.identity.mtimeMs === old.mtimeMs &&
+      state.identity.ctimeMs === old.ctimeMs;
+  }
   function trustedDir() {
     try {
       const st=fs.statSync(directory);
@@ -221,11 +241,10 @@ function createGuardianOfflineCasework(options) {
     const a=fs.fstatSync(fd), pathname=fs.lstatSync(file);
     if (!a.isFile() || a.nlink!==1 || (a.mode & 0o077)!==0 ||
         a.size>max || pathname.isSymbolicLink() ||
-        pathname.dev!==a.dev || pathname.ino!==a.ino ||
+        !pathname.isFile() || !sameMetadata(a,pathname) ||
         (typeof process.getuid==='function' && a.uid!==process.getuid())) {
       throw new Error('unsafe journal');
     }
-    if (a.size===0) return {rows:[],sha:null};
     const buf=Buffer.alloc(a.size);
     let at=0;
     while (at<buf.length) {
@@ -233,41 +252,61 @@ function createGuardianOfflineCasework(options) {
       if (n<=0) throw new Error('short read');
       at+=n;
     }
-    const b=fs.fstatSync(fd);
-    if (a.dev!==b.dev || a.ino!==b.ino || a.size!==b.size ||
-        a.mtimeMs!==b.mtimeMs || a.ctimeMs!==b.ctimeMs ||
-        buf[buf.length-1]!==10 ||
-        !Buffer.from(buf.toString('utf8'),'utf8').equals(buf)) throw new Error('unstable journal');
-    const lines=buf.toString('utf8').slice(0,-1).split('\n');
-    if (lines.length>MAX_LINES) throw new Error('oversize journal');
-    const rows=lines.map((line)=>{
-      if (Buffer.byteLength(line,'utf8')>512) throw new Error('oversize record');
-      const parsed=validRecord(parseUniqueKeySourceLock(Buffer.from(line)));
-      if (!parsed) throw new Error('invalid record');
-      return parsed;
-    });
-    if (!validateTimeline(rows)) throw new Error('invalid timeline');
-    return {rows,sha:crypto.createHash('sha256').update(buf).digest('hex')};
+    const b=fs.fstatSync(fd), endPath=fs.lstatSync(file);
+    if (!sameMetadata(a,b) || !sameMetadata(a,endPath) ||
+        !endPath.isFile() || endPath.isSymbolicLink()) {
+      throw new Error('unstable journal');
+    }
+    let rows=[];
+    if (buf.length) {
+      if (buf[buf.length-1]!==10 ||
+          !Buffer.from(buf.toString('utf8'),'utf8').equals(buf)) {
+        throw new Error('invalid journal bytes');
+      }
+      const lines=buf.toString('utf8').slice(0,-1).split('\n');
+      if (lines.length>MAX_LINES) throw new Error('oversize journal');
+      rows=lines.map(line=>{
+        if (Buffer.byteLength(line,'utf8')>512) {
+          throw new Error('oversize record');
+        }
+        const parsed=validRecord(parseUniqueKeySourceLock(Buffer.from(line)));
+        if (!parsed) throw new Error('invalid record');
+        return parsed;
+      });
+      if (!validateTimeline(rows)) throw new Error('invalid timeline');
+    }
+    return {rows,bytes:buf,identity:a,
+      sha:buf.length?crypto.createHash('sha256').update(buf).digest('hex'):null};
   }
   function withExclusive(action) {
-    if (!trustedDir()) return fail();
+    if (witnessBroken || !trustedDir()) return fail();
     let guard,fd,obtained=false,identity=null;
-    const writer = { started:false, verified:false };
+    const writer = {started:false,verified:false};
     try {
       guard=fs.openSync(lockFile,fs.constants.O_CREAT|fs.constants.O_EXCL|
         fs.constants.O_WRONLY|(fs.constants.O_NOFOLLOW??0),0o600);
       obtained=true;
       identity=fs.fstatSync(guard);
       fs.closeSync(guard);guard=undefined;
-      fd=fs.openSync(file,fdflags,0o600);
+      // After a witnessed file has existed, NEVER re-create it after
+      // deletion. Omitting O_CREAT prevents producing a false new baseline.
+      fd=fs.openSync(file,fdflags | (witness===null?fs.constants.O_CREAT:0),0o600);
       const state=snapshot(fd);
+      if (witness && !matchesWitness(state,witness)) {
+        witnessBroken=true;
+        return fail();
+      }
+      if (!witness) witness=makeWitness(state);
       return action(state,fd,writer);
-    } catch (_) {return fail();}
-    finally {
-      if (fd!==undefined) {try {fs.closeSync(fd);}catch(_) {}}
-      if (guard!==undefined) {try {fs.closeSync(guard);}catch(_) {}}
-      // A failed / partial write retains its lock for explicit Owner repair.
-      // Never automatically recover a lock after a crash or uncertain fsync.
+    } catch (_) {
+      // Once witnessed, even an uncertain failed read/write requires Owner
+      // intervention; a later restoration must not heal this session.
+      if (witness) witnessBroken=true;
+      return fail();
+    } finally {
+      if (fd!==undefined) {try {fs.closeSync(fd);}catch (_) {}}
+      if (guard!==undefined) {try {fs.closeSync(guard);}catch (_) {}}
+      // An uncertain write retains its lock for manual investigation.
       if (obtained && (!writer.started || writer.verified)) {
         try {
           const now=fs.lstatSync(lockFile);
@@ -279,24 +318,39 @@ function createGuardianOfflineCasework(options) {
       }
     }
   }
-  function append(fd, existing, newRows, writer) {
-    if (existing.length+newRows.length>MAX_LINES) throw new Error('record cap');
+  function append(fd, before, newRows, writer) {
+    if (before.rows.length+newRows.length>MAX_LINES) {
+      throw new Error('record cap');
+    }
     const data=Buffer.from(newRows.map(x=>JSON.stringify(x)+'\n').join(''));
-    const st=fs.fstatSync(fd);
-    if (st.size+data.length>max) throw new Error('journal cap');
+    if (before.bytes.length+data.length>max) throw new Error('journal cap');
+    // Reopen neither the journal nor the lock: operate only on the
+    // protected descriptor, but detect a mutation since the earlier read.
+    const now=snapshot(fd);
+    if (!matchesWitness(now,makeWitness(before)) ||
+        !now.bytes.equals(before.bytes) || !trustedDir()) {
+      witnessBroken=true;
+      throw new Error('journal changed before append');
+    }
     writer.started=true;
     if (fs.writeSync(fd,data,0,data.length)!==data.length) {
       throw new Error('partial write');
     }
     fs.fsyncSync(fd);
-    const after=fs.fstatSync(fd);
-    if (after.size!==st.size+data.length) throw new Error('write unverifiable');
+    const after=snapshot(fd), expected=Buffer.concat([before.bytes,data]);
+    if (after.identity.dev!==before.identity.dev ||
+        after.identity.ino!==before.identity.ino ||
+        !after.bytes.equals(expected) || !trustedDir()) {
+      throw new Error('journal changed after append');
+    }
+    witness=makeWitness(after);
     writer.verified=true;
   }
   function intakeMany(raw) {
     const batch=arraySnapshot(raw,MAX_INTAKE);
     if (!batch) return fail('GUARDIAN_CASEWORK_BATCH_INVALID');
-    return withExclusive(({rows},fd,writer)=>{
+    return withExclusive((state,fd,writer)=>{
+      const {rows}=state;
       const timeline=validateTimeline(rows);
       if (!timeline) return fail();
       const first=new Map(timeline.first), added=[];
@@ -312,7 +366,7 @@ function createGuardianOfflineCasework(options) {
         if (decision==='QUARANTINED') first.set(parsed.sha,entry.id);
       }
       if (!validateTimeline([...rows,...added])) return fail();
-      append(fd,rows,added,writer);
+      append(fd,state,added,writer);
       const items=added.map(x=>Object.freeze({
         id:x.id,decision:x.decision,reason:x.reason,
         bundleSha256:x.bundleSha256,originalId:x.originalId,
@@ -328,7 +382,8 @@ function createGuardianOfflineCasework(options) {
         !Object.hasOwn(TRANSITIONS,request.transition)) {
       return fail('GUARDIAN_CASEWORK_HANDOFF_INVALID');
     }
-    return withExclusive(({rows},fd,writer)=>{
+    return withExclusive((state,fd,writer)=>{
+      const {rows}=state;
       const origin=rows.find(x=>x.id===request.receiptId &&
         x.type==='INTAKE' && x.decision==='QUARANTINED');
       if (!origin) return fail('GUARDIAN_CASEWORK_HANDOFF_INVALID');
@@ -344,7 +399,7 @@ function createGuardianOfflineCasework(options) {
       const entry=receipt('HANDOFF',null,TRANSITIONS[request.transition],
         null,null,origin.id,request.transition);
       if (!validateTimeline([...rows,entry])) return fail();
-      append(fd,rows,[entry],writer);
+      append(fd,state,[entry],writer);
       return result('GUARDIAN_CASEWORK_HANDOFF_ANNOTATED',
         [Object.freeze({id:entry.id,subjectId:origin.id,
           transition:entry.transition,reason:entry.reason})],null);
@@ -366,11 +421,16 @@ function createGuardianOfflineCasework(options) {
         cur && (typeof cur.sha!=='string'||!HEX.test(cur.sha)||
           !Number.isSafeInteger(cur.before)||cur.before<1||
           cur.before>MAX_LINES)) return fail('GUARDIAN_CASEWORK_QUERY_INVALID');
-    if (!trustedDir()) return fail();
+    if (witnessBroken || !trustedDir()) return fail();
     let fd;
     try {
       fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0));
-      const {rows,sha}=snapshot(fd);
+      const state=snapshot(fd), {rows,sha}=state;
+      if (witness && !matchesWitness(state,witness)) {
+        witnessBroken=true;
+        return fail();
+      }
+      if (!witness) witness=makeWitness(state);
       if (cur && (cur.sha!==sha||cur.before>rows.length)) {
         return fail('GUARDIAN_CASEWORK_CURSOR_STALE');
       }
@@ -393,7 +453,8 @@ function createGuardianOfflineCasework(options) {
       return result('GUARDIAN_CASEWORK_EXCEPTIONS_LOCAL_ONLY',
         items,sha,next);
     } catch (err) {
-      if (err?.code==='ENOENT' && !cur) {
+      if (witness) witnessBroken=true;
+      if (err?.code==='ENOENT' && !cur && !witness) {
         return result('GUARDIAN_CASEWORK_EXCEPTIONS_NO_JOURNAL',[],null);
       }
       return fail();
