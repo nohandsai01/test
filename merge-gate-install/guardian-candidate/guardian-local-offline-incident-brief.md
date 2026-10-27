@@ -251,3 +251,33 @@ no casework directory, lock, account or real Check is created by the session.
 The pair is not an atomic OS transaction and the summaries are not signed
 attestations. Independent non-author QA is NOT_PROVEN. Source-only Draft:
 no Merge, Deploy, production D1, credential, Ruleset or payment action.
+
+
+## G38 — opt-in Operator casework + Generation V2 local observation
+
+An Owner may configure both \`caseworkDirectory\` and \`caseworkFileName\`
+when creating a local Operator session. The scope is pinned and validated
+at construction; callers cannot pass an arbitrary directory to the Operator
+method. When both are absent, the original Operator method surface is
+unchanged. A partial scope is rejected.
+
+\`operator.assessCaseworkGenerationEvidence()\` is read-only. It brackets a
+full passive casework-journal + lock observation around generation-aware
+runtime assessment, the redacted terminal brief and a complete cursor audit.
+Casework diagnostics independently re-read the journal and compare inode,
+metadata and SHA-256 across two reads. Inconsistent source, lock presence,
+Generation count drift, changed terminal evidence, or mismatched local
+snapshots produces P0 / NOT_VERIFIED without partial digests.
+
+A successful local report says
+\`LOCAL_COINCIDENT_OBSERVATIONS_ONLY\` — **not linked casework**.
+Casework V1 stores only the bundle digest; it does not contain a
+Generation V2 launch-ledger digest or a trusted cross-file transaction ID.
+\`crossJournalBinding\`, \`generationLedgerBinding\`, liveness, custody
+and release remain NOT_PROVEN / NOT_ISSUED. It never claims that manual
+handoff is authorized, or that a casework receipt proves a specific
+terminal failure. No files are created, unlocked, repaired or written
+by the Observer. This does not eliminate ABA/races between observations.
+
+Source only; Feature OFF; Launch HOLD; no Merge, Deploy, real Check,
+credentials, trusted anchor enrollment or production D1.

@@ -201,7 +201,8 @@ function openJournal(file,max) {
     const stats=summarise(rows);
     if (!stats) return {state:'JOURNAL_INVALID',stats:null,digest:null};
     return {state:'JOURNAL_STRUCTURALLY_CONSISTENT',
-      stats,digest:crypto.createHash('sha256').update(contents).digest('hex')};
+      stats,stamp:metadata(begin),
+      digest:crypto.createHash('sha256').update(contents).digest('hex')};
   } catch (e) {
     return e?.code === 'ENOENT' ?
       {state:'JOURNAL_MISSING',stats:null,digest:null} :
@@ -284,8 +285,16 @@ function createGuardianCaseworkDiagnostics(options) {
     }
     const lockBefore=lockSnapshot(lock);
     const journalState=openJournal(journal,max);
+    // Read the protected journal again *after* the lock observation.
+    // A writer replacing/rewriting the file during another local read
+    // cannot pass with a single earlier clean journal snapshot.
+    const journalAfter=openJournal(journal,max);
     const lockAfter=lockSnapshot(lock);
-    if (lockBefore.state!==lockAfter.state ||
+    if (journalState.state!==journalAfter.state ||
+        journalState.digest!==journalAfter.digest ||
+        (journalState.state==='JOURNAL_STRUCTURALLY_CONSISTENT' &&
+         !sameMeta(journalState.stamp,journalAfter.stamp)) ||
+        lockBefore.state!==lockAfter.state ||
         !sameMeta(lockBefore.stamp,lockAfter.stamp) ||
         !trustedDirectory()) {
       return failure('GUARDIAN_DIAG_CHANGED_DURING_READ',

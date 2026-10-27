@@ -32,16 +32,25 @@ const { createGuardianOfflineIncidentBrief } =
   require('./guardian-local-offline-incident-brief.cjs');
 const { createGuardianLocalLedgerAudit } =
   require('./guardian-local-event-ledger-audit.cjs');
+const { createGuardianCaseworkDiagnostics } =
+  require('./guardian-local-casework-diagnostics.cjs');
+const { createGuardianCaseworkGenerationAssessment } =
+  require('./guardian-local-casework-generation-assessment.cjs');
 
 const FIELDS = new Set(['cwd', 'entrypoint', 'directory', 'fileName',
   'startupTimeoutMs', 'shutdownTimeoutMs', 'healthProbeTimeoutMs',
-  'maxJournalBytes', 'healthObservationMaxAgeMs']);
+  'maxJournalBytes', 'healthObservationMaxAgeMs',
+  'caseworkDirectory', 'caseworkFileName']);
 
 function createGuardianLocalOperatorSession(options) {
   if (!options || typeof options !== 'object' ||
       Array.isArray(options) ||
       Object.keys(options).some((name) => !FIELDS.has(name))) {
     throw new Error('GUARDIAN_LOCAL_OPERATOR_SESSION_INVALID');
+  }
+  if ((options.caseworkDirectory === undefined) !==
+      (options.caseworkFileName === undefined)) {
+    throw new Error('GUARDIAN_LOCAL_CASEWORK_SCOPE_INVALID');
   }
   // All three components independently enforce immutable owner-approved
   // scopes, pinned entrypoint, directory/file protection and safe receipt
@@ -135,10 +144,24 @@ function createGuardianLocalOperatorSession(options) {
   const completeLedgerAudit = createGuardianLocalLedgerAudit({
     operator: readOnlyCore, pageSize: 50, maxCaptureMs: 5000,
   });
+  const caseworkAssessment = options.caseworkDirectory === undefined ? null :
+    createGuardianCaseworkGenerationAssessment({
+      caseworkDiagnostics:createGuardianCaseworkDiagnostics({
+        directory:options.caseworkDirectory,fileName:options.caseworkFileName,
+      }),
+      operator:Object.freeze({
+        assessRuntime:readOnlyCore.assessRuntime,
+        captureOfflineIncidentBrief:()=>offlineBrief.capture(),
+        auditCompleteEventLedger:()=>completeLedgerAudit.capture(),
+      }),
+    });
   const operator = Object.freeze({
     ...readOnlyCore,
     captureOfflineIncidentBrief: () => offlineBrief.capture(),
     auditCompleteEventLedger: () => completeLedgerAudit.capture(),
+    ...(caseworkAssessment ? {
+      assessCaseworkGenerationEvidence:()=>caseworkAssessment.assess(),
+    } : {}),
   });
   return Object.freeze({ owner, operator });
 }
