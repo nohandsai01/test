@@ -768,3 +768,529 @@ real schema (GitHub stubbed, `https.request` blocked, synthetic keys):
 Not covered: Cloudflare D1 hosted E2E, a real GitHub App installation, real
 keys or Checks, TLS termination, signal handling/process supervision and any
 production activation. Independent QA and security review remain required.
+
+## G15 — isolated process supervision, bounded OS signal handling (source-only)
+
+guardian-process-supervisor.cjs provides an **inert** process-manager adapter
+for a protected Guardian host that already exposes start(), stop() and
+status(). Importing or constructing it does not start a listener, install
+OS signal handlers, register credentials, start a cloud App or change D1.
+
+A separately owner-controlled process manager calls
+createGuardianProcessSupervisor({host, onTerminal, signalSource?, stopDeadlineMs?})
+with an independently configured createGuardianProtectedHost instance. The
+owner explicitly calls await supervisor.start(). Only this explicit call
+registers SIGTERM/SIGINT handlers, before asynchronous host start. No signal
+is handled implicitly on import. The default signal source is Node's process,
+but an injected emitter supports offline deterministic tests.
+
+- Signals during startup queue a stop after startup settles. Simultaneous
+  signals and a manual stop coalesce into **one** host.stop() attempt.
+- Shutdown is bounded (default 15 seconds, configurable 50–30000 ms). The
+  existing Protected Host performs its own graceful-drain/forced socket close;
+  this supervisor only bounds the outer stop acknowledgement. A timed-out or
+  failed stop returns FAILED and an immutable failure receipt. It must never
+  claim the host stopped merely because the deadline elapsed.
+- Startup errors attempt a bounded cleanup, including partial listeners. Any
+  uncertainty is FAILED, never RUNNING. Signal listeners are removed after
+  successful or failed termination; cleanup errors cannot be silently PASS.
+- The owner-required synchronous onTerminal callback receives a single
+  minimal frozen {state, reason, errorCode, hostStopped, activationAllowed,
+  releaseAuthority} receipt. A missing or throwing callback is a configuration
+  or terminal failure. **The external process manager** decides whether and
+  how to kill/restart the process; this module never calls process.exit/kill,
+  never restarts automatically, and never clears a D1 tombstone.
+- status() and terminal receipts always declare activationAllowed=false
+  and releaseAuthority=NOT_ISSUED. No raw Host keys, policy, tokens, request
+  headers, D1 credentials or reservation contents appear in them.
+
+Tests use synthetic signal emitters, bounded fake hosts, and a real loopback
+listener. Child-process OS signal tests use only local Node processes,
+no GitHub egress. These establish source/local OS-lifecycle semantics,
+**not** live hosted D1, real Check App issuance, TLS/process manager deployment,
+native GitHub Approval, or production readiness.
+
+All prior Founder-only Merge, Deploy, App/Key, Ruleset, Check and production
+actions remain prohibited. The feature is not integrated into a live launcher
+and its activation remains HOLD.
+
+
+### Explicit Protected Host / Supervisor assembly
+
+The inert guardian-host-process-runner.cjs composes the existing strictly
+validated Protected Host with guardian-process-supervisor.cjs. It requires
+explicit protectedHostConfig and a synchronous owner onTerminal callback;
+an injected signalSource and stopDeadlineMs are optional. Importing or
+constructing the runner opens no port and subscribes to no OS signals.
+Only an authorized external process manager may call runner.start().
+
+The returned frozen facade exposes only start(), stop() and status(), not
+protected configuration, D1 stores, tokens, keys, Check writers or the raw
+Host instance. Status shows a strictly validated loopback address/port only
+when RUNNING, never an externally routable URL, and always
+releaseAuthority=NOT_ISSUED, activationAllowed=false. Tests instantiate a
+real Protected Host in OFF mode with the actual SQLite schema and synthetic
+RSA/Ed25519 key fixtures, read /healthz on loopback, then emit a synthetic
+SIGTERM and verify the HTTP listener and process-manager signal handlers close.
+
+This is source-only assembly, not production deployment, public network
+exposure, provisioning, native GitHub approval or runtime activation.
+
+
+## G16 — owner-controlled isolated child process manager (source-only)
+
+guardian-local-process-controller.cjs implements an explicitly operated
+local child-process lifecycle wrapper for the previously built Guardian
+Host/Supervisor. Merely importing/constructing this module does not
+spawn a child, configure a Host, create keys or contact GitHub/D1.
+
+- Owner supplies an absolute, existing regular-file child entrypoint beneath
+  a canonical pinned directory; symlinks and path changes before start are
+  rejected. The module does not accept PR-supplied scripts or executable
+  paths. Only the owner-controlled caller may invoke start().
+- The child is started with Node's fixed process.execPath and shell=false,
+  a minimal non-inherited environment (no app keys, GitHub tokens or secret
+  refs passed via argv/environment) and an IPC-only lifecycle protocol.
+- A valid READY message is a minimal source-only/HOLD receipt; it cannot
+  enable real release authority. Unknown, duplicate, hostile or premature
+  messages are protocol failures and never authorize any Check.
+- The parent bounds readiness and graceful SIGTERM shutdown, escalating to
+  SIGKILL **only for the ChildProcess instance it actually created** on
+  timeout or a malicious child that ignores SIGTERM. No arbitrary PID, system
+  process, Docker service or hosted runtime is addressed.
+- Child exit is STOPPED only when a graceful stop was requested, a valid
+  TERMINAL frame was observed and exit code was zero. Unexpected exit,
+  startup failure, bad protocol, nonzero exit, forced shutdown, invalid
+  terminal callback, or a stop before READY all remain FAILED.
+- There is no auto-restart, remote registration, privilege elevation,
+  production deployment, real Host configuration loading or real Check
+  issuance. A separate owner process manager is responsible for immutable
+  deployment images, key custody, and explicit staging activation.
+
+Tests launch disposable local Node fixtures, establish loopback listeners,
+exercise readiness/terminal IPC, SIGTERM escalation, child death, startup
+timeout, rejected frames, duplicate events, and shutdown races. All statuses
+and receipts stay non-authorizing. The tests do not use real keys or any
+production D1/GitHub App. Completion is source-only until separately
+authorized hosted E2E acceptance.
+
+
+## G17 — protected Host child runtime and local durable terminal receipts
+
+The child-side module guardian-child-runtime.cjs binds an OWNER-SUPPLIED
+createRunner factory to an explicit ChildProcess IPC lifecycle. Import and
+construction are inert: the external owner runtime decides which local
+protected configuration factory is trusted. No Host configuration, App private
+key, D1 binding or Check authority is accepted over the parent IPC channel.
+
+The child starts the existing Protected Host process runner in its own
+process, verifies RUNNING/HOLD status with a loopback-only GET /healthz
+(including running=true, feature OFF_OR_SOURCE_ONLY and NOT_ISSUED) under
+a bounded deadline, and only then emits the exact minimal READY frame. A
+missing, malformed, stale or overlarge health result never enables READY.
+An existing Supervisor SIGTERM/SIGINT stop causes the fixed TERMINAL frame
+to be sent over the IPC channel before disconnection. No automatic restart,
+public listener, process.exit or raw secret-bearing status is added.
+
+The independent parent-side guardian-local-receipt-journal.cjs accepts
+only terminal receipt primitives and writes an append-only JSONL line with
+a random event ID and UTC timestamp. The caller pins an owner-only directory
+and a tightly validated journal filename. The file uses O_APPEND, O_NOFOLLOW,
+0600 permissions, bounded total size and synchronous fsync; symlinks, unsafe
+directory permissions, unexpected receipt fields and storage uncertainty
+fail closed. A journal failure makes the parent Controller return FAILED,
+not a falsely clean STOPPED. The journal does not clear D1 reservations or
+record tokens, private keys, raw errors, GitHub payloads or HTTP headers.
+
+The new source-only child fixture builds an OFF-mode real Protected Host
+with an isolated SQLite D1 schema and synthetic RSA/Ed25519 test keys
+entirely within the child. Tests use a separately spawned Node process,
+real IPC, loopback health, graceful signal shutdown and durable parent
+journal across distinct child lifetimes. Negative scenarios cover premature
+exit, falsified ready frames, corrupted health, health timeout, unsafe
+receipts/filesystem permissions and failure to persist terminal evidence.
+These proofs are LOCAL ONLY: they do not replace an approved protected
+runtime image, hosted D1, GitHub App identity/issuer or production launch.
+
+
+## G18 — local Guardian operator diagnostics and manual HOLD triage
+
+guardian-local-diagnostics.cjs is a separate, read-only observation adapter
+for an owned Guardian ChildProcess Controller and an append-only terminal
+receipt journal. It is inert until inspect() is explicitly called. All
+results keep status=SOURCE_ONLY_HOLD, liveness=NOT_PROVEN,
+activationAllowed=false, releaseAuthority=NOT_ISSUED and
+automaticRestartAllowed=false. PID presence or a previously clean STOPPED
+record never constitutes proof that a process is alive or the hosted
+Guardian Check issuer is safe.
+
+The adapter pins an owner-only evidence directory and a fixed, allowlisted
+journal filename; reads the journal with O_NOFOLLOW and bounded bytes;
+verifies file ownership, size, permissions, inode/mtime/ctime stability,
+complete UTF-8/JSONL records, unique event IDs, strict receipt keys and
+the controller's before/after state. It never writes, truncates, rotates or
+repairs the journal. Read errors, missing or partial files, duplicated,
+unknown or malformed entries, changed files and controller drift all
+require manual intervention.
+
+Each report exposes only non-secret fields: sanitized process state,
+last terminal state/error code/UTC timestamp/event ID, journal entry count,
+SHA256 of observed bytes, and manualInterventionRequired. A historical
+FAILED receipt remains a manual-review HOLD even after a later STOPPED
+receipt; a later apparently clean process cannot silently clear an old
+fault. CLEAN_STOP is solely an observation of a stopped local controller
+and a valid journal, not a release or reactivation approval.
+
+guardian-local-operator-session.cjs composes existing Controller, receipt
+Journal and read-only Diagnostics but returns **separate frozen owner and
+operator capabilities**: owner can start/stop/status; operator can inspect
+only. The Operator object has no start, stop, recovery, token, D1 write,
+Check publishing or journal reset method. It is not an HTTP endpoint,
+not a live service and not accessible outside the local owner boundary.
+
+The new offline tests exercise real Protected Host child start/stop,
+durable failure receipts across separate process instances, manually
+persistent faults, repeated read-only inspections without changing file
+bytes/mtime, symlinks, partial JSON, ownership or quota failures, and
+untrusted status or input. It is not hosted Cloudflare D1 E2E, real
+GitHub App Check issuance, native non-author GitHub Approval or production
+readiness. The active Founder launch HOLD remains binding.
+
+
+## G18 — Read-only Operator event window and incident evidence (source-only)
+
+The local diagnostic reader now exposes recentEvents({ limit, cursor }) through
+the isolated Operator capability. The owner-only start/stop/status capability
+is unchanged. Default limit is 10, maximum is 50, and queries always validate
+the entire bounded JSONL journal (including duplicate JSON keys, event IDs,
+record schema, file owner/permissions, symlinks, file changes and controller
+state). They never create a file, clear errors, spawn a child or write to D1.
+
+Pages return the newest events first and only the four allowlisted fields
+eventId, timestamp, state and errorCode. An opaque-in-purpose, explicitly
+nonsecret cursor contains the observed journal SHA-256 and preceding row
+offset. Any changed journal invalidates the cursor and returns no events;
+there is no cached page, hidden pagination state or implicit restart. Cursor
+hashes identify the local observed bytes only and are NOT authentication,
+integrity attestation, authorization, liveness proof or release tokens.
+
+Each validated page includes an immutable incident summary containing
+failureCount, firstFailure, latestFailure and manualInterventionRequired.
+Any historical FAILED receipt continues to require manual intervention even
+after a later successful STOPPED receipt. There is no fault acknowledgment,
+reset, erase, override, approval or release endpoint; source remains HOLD.
+
+Both inspect() and recentEvents() use the same journal/controller validation
+snapshot. On corrupt, missing, truncated, swapped or unauthorized files, or
+an unverified controller, the event page carries zero rows and fail-closed
+SOURCE_ONLY_HOLD. Query input failures produce fixed nonsecret error codes.
+
+This is a local observer for an already owned child lifecycle only. It does
+not provide operator authentication, a daemon interface, a durable custody
+ledger, a trust anchor or production acceptance.
+
+
+## G19 — Immutable local fault evidence packet (source-only)
+
+A local Operator can now call incidentEvidence({ eventId, journalSha256 })
+on its read-only capability. Both fields are optional: an omitted event ID
+selects the latest FAILED receipt in the currently validated journal. An
+explicit event ID selects only that exact FAILED event, never silently
+substituting a newer one. The optional journalSha256 is an optimistic
+snapshot binding: if the bytes changed since the caller last observed them,
+the query returns UNAVAILABLE with zero selected receipt details. Invalid
+inputs (including object accessors, unexpected keys, symbols and unsafe
+Proxy traps) reject before touching the journal.
+
+One protected journal/controller read supplies the packet. It checks the
+same owner-only storage permissions, complete bounded JSONL, unique receipt
+IDs, duplicate JSON keys, file metadata stability, and controller state
+before/after as the prior inspect/recentEvents APIs. No second,
+potentially divergent file read is used to assemble the packet.
+
+The bounded fault packet contains only allowlisted terminal-receipt metadata:
+the selected failure's 1-based sequence, adjacent preceding/following
+receipts, first and last failure, failure count, total event count, current
+controller observation reason, SHA-256 of journal bytes and SHA-256 of the
+canonical returned packet fields (excluding its own evidenceSha256 field).
+The packet digest is deterministic for equivalent observations. No raw JSON,
+PID, App private key, bearer token, process env, error message, D1 payload,
+webhook content, arbitrary file path, credential or personal identifier is
+returned. The packet is frozen, read-only and bounded to five selected event
+metadata objects regardless of the journal length.
+
+If there is no FAILED event, an unrecognized event ID, a STOPPED event ID,
+a stale snapshot, a missing/corrupt/untrusted journal, or controller drift,
+the packet is UNAVAILABLE; it contains no selected event, digest or
+fault-context metadata and maintains manualInterventionRequired=true.
+A historical FAILED remains recorded and requires manual review even when
+subsequent process lifetimes append clean STOPPED receipts.
+
+authority=LOCAL_UNAUTHENTICATED_OBSERVATION is deliberate: SHA-256 is a
+comparison digest, NOT a signature, independent attestation, append-only
+storage proof, permission to restart, evidence of process liveness or Check
+release authority. A write-capable local adversary can replace the file and
+recompute the digest. No export/upload endpoint, automatic approval,
+acknowledge, reset, Check publication or hosted mapping is introduced.
+
+
+G19 hardening additionally rechecks the pinned evidence directory's inode,
+ownership and restricted mode on EACH observation, before and after reading
+its journal. A directory replaced or made writable by other users after
+the diagnostics constructor ran cannot silently result in a clean report.
+Controller status fields are taken once from ordinary own data properties,
+not accessors or unrecognized status fields; malformed/hostile status
+objects are unverified, never a basis for a clean stop or fault packet.
+
+## G20 — Independent read-only local incident packet comparison (source-only)
+
+The separate `guardian-local-evidence-verifier.cjs` module accepts an
+existing G19 `incidentEvidence()` packet and compares it with the exact
+owner-owned local journal bytes read from a private owner-configured file.
+It NEVER calls `incidentEvidence()` or relies on any of the packet's
+reported fields as the source of truth. It independently validates the
+whole bounded journal: duplicate JSON fields and event IDs, schema,
+timestamps, state, owner-only file permissions, pinned directory identity,
+file inode/size/metadata stability and SHA-256 over actual observed bytes.
+
+Only packets with an exact field allowlist, data properties, fixed
+non-authorizing values and a reconstructed canonical packet SHA-256
+are considered for comparison. MATCH requires the same journal bytes,
+event count, selected failure position, preceding/following receipts,
+first/latest failures and failure count. A forged or stale context fails
+closed, even if a caller recomputes the packet digest. Responses are
+fixed-size, frozen and sanitized: no raw journal, arbitrary error, key,
+token, PID, Check payload or path is returned.
+
+The Operator-only facade exposes `verifyIncidentEvidence(packet)`.
+Its positive result is deliberately `MATCH_LOCAL_SNAPSHOT_ONLY`, NOT
+proof of trusted source custody or process-controller identity. Both
+positive and negative outcomes preserve SOURCE_ONLY_HOLD,
+manualInterventionRequired=true, activationAllowed=false,
+automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED.
+
+Scope limit: this proves internal consistency with local readable bytes
+at one observation, NOT process liveness, independent custody, evidence
+signatures, restart approval, audit-grade provenance, hosted D1 integrity
+or authorization to publish any GitHub Check. A local write-capable
+adversary can replace the journal AND reconstruct both digests. No
+signing keys, credentials, writable operator APIs, Merge, Deploy or
+activation transitions are added.
+
+## G21 — Read-only local append-continuity witness (memory-only, source-only)
+
+The G20 verifier now also exposes `observeContinuity()` using the SAME
+protected journal reader; the separated Operator facade exposes
+`observeLocalContinuity()`. This is not an exporter, release gate, new
+process manager or hosted activation path. Construction/import do no I/O;
+the first explicit observation reads only the pinned, owner-only journal.
+
+The first complete and valid journal read establishes a local untrusted
+baseline. Later observations validate the entire bounded JSONL again and
+require the same device/inode, nondecreasing length and event count, and an
+exact SHA-256 match of the prior known bytes as the prefix of the new file.
+A byte-identical repeat preserves the same step; new validated receipts
+advance the local chain once, with an explicit count of new entries.
+The local chain hash deterministically links prior chain hash, journal
+SHA-256, record count and byte length. It is NOT signed, a durable ledger
+or an external trust anchor. The observer accepts no caller-supplied path,
+baseline digest, restart approval or override.
+
+Once a baseline exists, a valid file with changed historical bytes,
+truncated history, replaced inode, malformed/duplicate receipts or
+owner-permission drift permanently latches the observer into NOT_VERIFIED
+for its lifetime. Before the first baseline, a missing journal returns
+NOT_VERIFIED/HOLD without latching (allowing the first child to create it).
+No Operator method
+can reset or clear it. A new instance yields only a NEW untrusted baseline:
+it cannot claim the old instance's observations or cross-process continuity.
+
+The result is bounded and frozen: local step count, prior/current digest,
+added entry count, internal chain digest and fixed non-authorizing safety
+flags; no PID, raw journal, credentials, file paths or keys.
+`status=SOURCE_ONLY_HOLD`, `manualInterventionRequired=true`,
+`custodyVerified=false`, `externalAnchorVerified=false`,
+`activationAllowed=false`, `automaticRestartAllowed=false`, and
+`releaseAuthority=NOT_ISSUED` are invariant, even on a positive append
+comparison. Relative detection is against the immediately preceding
+in-process observation. It does not establish independent custody, protect
+against a hostile writer before first read or persist an anchor on restart.
+No D1, GitHub App, Check publication or deployment actions are introduced.
+
+
+## G22 — Operator-only bounded fault triage and manual action cues (source-only)
+
+guardian-local-diagnostics.cjs now exposes faultTriage() from exactly
+one protected, owner-owned journal read and one validated Controller status
+observation. The separated guardian-local-operator-session.cjs facade
+exposes the same read-only method to Operators without modifying the Owner
+start/stop surface. Import and construction remain inert.
+
+A frozen allowlisted summary provides a four-level local investigation
+priority (P0 through P3), static classification/next-action codes, state,
+journal count/hash and first/latest recorded failure IDs/timestamps/error
+codes. It does NOT return a PID, file path, raw JSONL, credentials, arbitrary
+exception messages, GitHub Check payload, restart controls or raw D1 data.
+
+- **P0 EVIDENCE_UNVERIFIED:** Controller identity/state or journal evidence
+  is inaccessible, malformed, replaced, insecure or changed during read;
+  Owner must investigate protected local evidence. This is not a confirmed
+  tampering claim. A RUNNING Controller without a terminal journal is also
+  P0, because it cannot be verified from persisted receipts alone.
+- **P1 RECORDED_FAILURE / CONTROLLER_FAILED:** any previously validated FAILED
+  receipt, *even after later STOPPED receipts*, or a currently failed
+  Controller. Owner must review history or investigate controller failure.
+- **P2 NO_LOCAL_BASELINE / PROCESS_STATE_UNPROVEN:** an inert CREATED
+  Controller before its first journal exists, or a non-terminal lifecycle
+  state with a valid prior journal; Owner must verify prerequisites or
+  reconcile process lifecycle, not infer liveness from local receipts.
+- **P3 LOCAL_STOP_OBSERVED:** valid owner-only journal contains no historical
+  failure and Controller says STOPPED, representing only one local clean-stop
+  observation; no runtime/production trust can be inferred.
+
+status=SOURCE_ONLY_HOLD, liveness=NOT_PROVEN, activationAllowed=false,
+automaticRestartAllowed=false, releaseAuthority=NOT_ISSUED remain
+invariant in ALL branches. Even P3 is NOT authorization for automatic
+restart, GitHub Check release, D1 mutation, or launching production services.
+
+P0–P3 are deterministic manual investigation ordering hints, not a
+verified operational incident severity or authority decision. An attacker
+with filesystem write rights can still replace the journal and recompute
+digests before a fresh observation. The new tests cover the actual isolated
+Protected Host child process, historical failure persistence, malformed
+journal, symlink/permission violations, Controller state drift/getters,
+pure-read behavior and strict output boundaries. No live environment
+actions, keys, Merge, Deploy or permission mutation were added.
+
+
+## G23 — Bounded on-demand active child health probe (source-only)
+
+Previously the Operator's RUNNING status was only an IPC READY receipt
+captured when the child started; it did not establish whether the child or
+the protected loopback listener continued responding. This batch adds an
+explicit, read-only health challenge, NOT a restart/watchdog/activation path.
+
+The owner-pinned parent Controller now exposes probeRuntime(), and the
+separated Operator facade exposes only the same asynchronous read. The
+parent generates a 128-bit random challenge, sends a fixed-shape
+HEALTH_PROBE to its own ChildProcess IPC channel, and accepts a fixed-shape
+HEALTH_RESULT only with that exact outstanding challenge. The real child
+re-checks its current Protected Host Runner status and the loopback
+/healthz endpoint before returning a boolean. Neither side sends a raw
+Host status, D1 access, PID, credentials, network address, token, exception
+text or Check publication capability through IPC. A verified local probe
+means a recent *local child IPC + loopback roundtrip only*, not OS identity,
+outside-origin reachability, auditable custody or release authorization.
+
+Simultaneous callers coalesce into one request, and Owner config bounds
+the deadline to 50–5000ms (default 3000ms). Unresponsive/malformed/false
+responses cannot be used to claim liveness; a timeout or negative health
+latches further probes into NOT_PROVEN for that controller lifetime. One
+late, valid response to the expired challenge is ignored rather than
+resurrecting trust. Unknown or mismatched protocol frames remain the
+existing fail-closed Controller protocol violations. A stop during an
+in-flight probe resolves the read as NOT_PROVEN; it never delays shutdown.
+Import and construction remain inert; probeRuntime() never calls start(),
+stop(), signal(), reset(), D1 or GitHub. The Owner is still the only side
+allowed to start/stop the child, and probes do not mutate the journal.
+
+A frozen, sanitized result always includes SOURCE_ONLY_HOLD,
+manualInterventionRequired=true, activationAllowed=false,
+automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED. Even the
+positive observation is NOT a launch approval.
+
+Source-only tests use the actual Protected Host child and loopback socket,
+as well as disposable synthetic children for stale, false, forged,
+unsolicited, extra-field, timeout, coalescence, stop-race and configuration
+boundary cases. No production listener, hosted D1, real GitHub App Check
+issuer, credential changes, Merge or Deploy are part of this feature.
+
+## G24 — Ephemeral local probe freshness & state drift (source-only)
+
+The existing Operator probeRuntime() remains an explicit, bounded IPC +
+loopback probe. Its result is now recorded by an inert, in-memory observation
+facade. Operator may additionally call observeRuntimeHealth() to inspect
+whether its own last successful probe is within a pinned, bounded monotonic
+age window (50–30000ms, default 1000ms). Passive observation does not send
+IPC, touch the journal, issue Check, start/stop or auto-retry the child.
+
+Freshness is not ongoing liveness. Even a recent snapshot reports
+liveness=NOT_PROVEN, SOURCE_ONLY_HOLD, manual intervention required,
+no restart, no activation and no release authority. It exposes only a
+timestamp, elapsed milliseconds and bounded reason, never PID, challenge,
+secret or raw payload. The snapshot expires monotonically and is invalidated
+on unexpected controller state, PID/error changes, rejected active probe or
+Owner stop. All sample state is volatile and cannot survive process restart
+as a bogus durable attestation. Invalid/proxy-like status or forged payload
+are rejected or sanitized fail-closed.
+
+Tests cover both a real isolated Protected Host child and deterministic
+negative scenarios for stale probe, state/PID drift, malformed response,
+probe failure, concurrent requests, read-only passive inspection and invalid
+configuration. No reviewer, production D1, GitHub App, Check issue, Merge,
+Deploy, permission change or credentials are part of this batch.
+
+
+## G25 — Operator passive runtime assessment and fault priority (source-only)
+
+The isolated Operator facade now exposes assessRuntime(), a **synchronous,
+read-only** fusion of existing faultTriage() and observeRuntimeHealth().
+It is not a health probe, daemon monitor, liveness certification, Check
+publisher, recovery action or permission to clear HOLD. It creates no new
+credentials and does not alter the owner-controlled start/stop methods.
+
+The assessment brackets those two readings with sanitized Controller status
+snapshots. A changed state/PID/error, malformed or inconsistent evidence,
+exception or unexpected authority field forces P0
+LOCAL_OBSERVATION_UNVERIFIED with an owner-only investigation recommendation.
+Only whitelist primitives from either underlying source reach the result;
+raw receipts, child PID, filesystem paths, tokens, exceptions and secrets are
+not included. The facade performs no IPC or probeRuntime() call.
+
+P0 invalid/uncertain evidence and P1 recorded historic faults retain their
+existing priority regardless of a recent local probe. P2 RUNNING observations
+are distinguished as RECENT_LOCAL_PROBE_ONLY, LOCAL_PROBE_EXPIRED or
+NO_VERIFIED_HEALTH_SAMPLE to guide which local read the owner should request;
+all remain manual-intervention and SOURCE_ONLY_HOLD. Clean stopped P3 remains
+only a local observation; no restart/activation/Check authority is granted.
+Health samples are bounded by their original volatile monotonic freshness
+window. There is no assurance the process stayed healthy between or after
+the two reads, nor protection against an already compromised local process or
+an attacker who can rewrite both local files and baselines.
+
+Tests cover a real protected child lifecycle with an isolated temporary
+journal plus deterministic P0/P1/P2/P3, freshness, malformed fields, controller
+drift, no-side-effects and exception/non-leakage scenarios. Hosted D1,
+production process identity, GitHub App Check signer, independent QA and
+deployment acceptance remain outside this source-only development batch.
+
+
+## G26 — bracketed runtime/journal race consistency (source-only)
+
+G25's passive assessRuntime() now uses a bounded double-journal/triage
+read around a single health-observation read, plus three sanitized
+Controller snapshots (before, between and after). Both independently
+observed journal histories must agree on protected SHA-256, event count,
+fault count, classification, source reason, process state and owner action.
+Each Controller snapshot must agree on state, PID and error code. Any
+mismatch, mid-read journal append/replacement, missing baseline transition,
+hostile getter or thrown reader causes P0 LOCAL_OBSERVATION_UNVERIFIED,
+manual owner investigation and SOURCE_ONLY_HOLD. G26 never retries or
+corrects evidence, never probes/starts/stops a child and never clears HOLD.
+
+A RECENT health sample is also checked against elapsed monotonic time spent
+across both journal reads: if it has aged beyond its own pinned max-age by
+the end of the bracket, the result becomes P0 instead of retaining RECENT.
+There is no new Check authority, no raw journal payload or PID in results.
+
+These checks detect observable races, not a linearizable multi-source OS
+transaction: extremely brief process/journal changes that return to
+byte-identical values between observation points (ABA), or compromise of
+all local evidence, remain outside their proof. The status always returns
+liveness=NOT_PROVEN, activationAllowed=false,
+releaseAuthority=NOT_ISSUED and automaticRestartAllowed=false.
+Negative tests deliberately mutate journal metadata during the health
+read, append a real protected receipt, vary the mid-snapshot PID, poison
+the second read with exceptions/getters, and expire a RECENT observation
+while the second read is delayed. No reviewer or production activation
+is performed mid-batch.
