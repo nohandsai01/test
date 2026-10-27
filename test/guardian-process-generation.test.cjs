@@ -556,21 +556,31 @@ test('G30: concurrent sessions on one journal get distinct generations and recon
         directory, fileName: FILE, cwd: directory, entrypoint,
         startupTimeoutMs: 2000, shutdownTimeoutMs: 600,
       }));
-    const started = await Promise.all(sessions.map((s) => s.owner.start()));
-    const ids = started.map((ready) => ready.generationId);
-    assert.equal(new Set(ids).size, 3);
-    ids.forEach((id) => assert.match(id, GEN));
-    // While siblings are live, each Operator sees the others as unterminated.
-    assert.equal(sessions[0].operator.faultTriage().priority, 'P1');
-    const stopped = await Promise.all(sessions.map((s) => s.owner.stop()));
-    stopped.forEach((s) => assert.equal(s.state, 'STOPPED'));
-    const rows = journalRows(directory);
-    assert.deepEqual(rows.map((row) => row.generationId).sort(), [...ids].sort());
-    for (const session of sessions) {
-      const triage = session.operator.faultTriage();
-      assert.equal(triage.priority, 'P3');
-      assert.equal(triage.unterminatedGenerations, 0);
-      assertHold(triage);
+    try {
+      const started = await Promise.all(sessions.map((s) => s.owner.start()));
+      const ids = started.map((ready) => ready.generationId);
+      assert.equal(new Set(ids).size, 3);
+      ids.forEach((id) => assert.match(id, GEN));
+      // Verified in-process V2 READY is a P2 concurrency witness,
+      // not an unverified crashed P1; neither is permission to release HOLD.
+      const concurrent = sessions[0].operator.faultTriage();
+      assert.equal(concurrent.priority, 'P2');
+      assert.equal(concurrent.classification, 'PROCESS_STATE_UNPROVEN');
+      assert.equal(concurrent.concurrentGenerations, 2);
+      assert.equal(concurrent.unterminatedGenerations, 0);
+      const stopped = await Promise.all(sessions.map((s) => s.owner.stop()));
+      stopped.forEach((s) => assert.equal(s.state, 'STOPPED'));
+      const rows = journalRows(directory);
+      assert.deepEqual(rows.map((row) => row.generationId).sort(), [...ids].sort());
+      for (const session of sessions) {
+        const triage = session.operator.faultTriage();
+        assert.equal(triage.priority, 'P3');
+        assert.equal(triage.unterminatedGenerations, 0);
+        assert.equal(triage.concurrentGenerations, 0);
+        assertHold(triage);
+      }
+    } finally {
+      await Promise.allSettled(sessions.map((s) => s.owner.stop()));
     }
   });
 });

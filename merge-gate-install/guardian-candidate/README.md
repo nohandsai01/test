@@ -1423,3 +1423,42 @@ successful write. The pre-append prefix is rechecked after fsync. Detected
 drift fails closed without repair, rotation, deletion or release authority.
 New writer instances cannot attest preexisting history; cross-process TOCTOU
 races remain. No signed witness, cross-process lock or Check authority added.
+
+
+## G27-G30 post-batch integration: same-process concurrency + V2 incident binding
+
+This isolated follow-on batch starts from PR #19 exact Head
+d627a162f02c974f7c064a6d0c401452eb5f2436 and leaves the original
+Writer branch unchanged.
+
+- The owner-only launch ledger still records each generation before spawn.
+  The local journal additionally keeps a VOLATILE per-journal same-Node-
+  process live witness, set ONLY after the parent verifies the V2 READY
+  frame for its durable launch generation; it is retired on terminal
+  callback (even when its terminal journal write fails).
+  It is not an OS attestation, cross-process lease or PID health proof.
+- Diagnostics reconciles an explicitly locally witnessed concurrent
+  generation against a genuinely unexplained open generation.
+  Concurrent local sessions are P2 PROCESS_STATE_UNPROVEN with HOLD,
+  rather than a false crash P1. Missing terminal without a local
+  witness remains P1 UNTERMINATED_GENERATION even if a newer session
+  finishes normally. Invalid or conflicting ledger/receipt is P0.
+- Generation-bound FAILED incident packets now use schema V2 with
+  generationId and launchLedgerSha256 included in canonical evidence
+  SHA-256, plus minimal generation fields on referenced neighbor
+  receipts. The independent verifier rereads the protected, pinned
+  owner-only launch ledger, validates SHA-256, duplicate/replayed launch
+  IDs and terminal-to-launch binding, and prevents V2 packet downgrade
+  to V1. Legacy V1 incident packets remain valid only when the selected
+  FAILED receipt is actually legacy V1.
+- Every observation remains SOURCE_ONLY_HOLD, liveness NOT_PROVEN,
+  custodyVerified false, automaticRestartAllowed false and
+  releaseAuthority NOT_ISSUED. An incident checksum match is NOT a
+  signature, custody attestation, release grant or process-liveness proof.
+
+Known limitation: same-process witness cannot attest a distinct OS
+process, and an unknown external unclosed generation remains a P1
+owner-reconciliation HOLD. Deleting both journal and ledger still
+requires a separately trusted external baseline; compromising same-UID
+source bytes is outside the local model. No Merge, Deploy, real D1,
+Check, keys or production mutation is part of this batch.
