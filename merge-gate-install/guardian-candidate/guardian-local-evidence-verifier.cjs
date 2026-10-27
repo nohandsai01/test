@@ -27,6 +27,10 @@ const STATES = new Set(['CREATED', 'STARTING', 'RUNNING',
 const RECEIPT_FIELDS = Object.freeze(['schemaVersion', 'eventId',
   'timestamp', 'state', 'errorCode', 'hostStopped', 'activationAllowed',
   'releaseAuthority', 'automaticRestartAllowed']);
+// G27 v2 receipts carry the process generation they terminate.
+const BOUND_RECEIPT_FIELDS = Object.freeze([...RECEIPT_FIELDS,
+  'generationId']);
+const GENERATION = /^[0-9a-f]{32}$/;
 const EVENT_FIELDS = Object.freeze(['eventId', 'timestamp', 'state', 'errorCode']);
 // Ordered exactly as G19's evidenceEnvelope uses for JSON/SHA-256.
 const PACKET_FIELDS = Object.freeze(['schemaVersion', 'kind', 'authority',
@@ -120,8 +124,12 @@ function validatePacket(value) {
   return fields;
 }
 function validReceipt(row) {
-  const record = copyExactData(row, RECEIPT_FIELDS);
-  if (!record || record.schemaVersion !== 1 ||
+  const bound = copyExactData(row, BOUND_RECEIPT_FIELDS);
+  const record = bound ?? copyExactData(row, RECEIPT_FIELDS);
+  if (!record || record.schemaVersion !== (bound ? 2 : 1) ||
+      (bound && !(record.generationId === null ||
+        (typeof record.generationId === 'string' &&
+          GENERATION.test(record.generationId)))) ||
       typeof record.eventId !== 'string' || !EVENT_ID.test(record.eventId) ||
       typeof record.timestamp !== 'string' ||
       !TIMESTAMP.test(record.timestamp) ||

@@ -5,6 +5,11 @@
  * synchronous so storage failure makes the parent Controller fail closed.
  * Only allowlisted primitives are recorded; never serialized Host objects,
  * tokens, keys, D1 records, arbitrary exception messages or provider blobs.
+ *
+ * G27-G30: a receipt bound to a process generation is written as
+ * schemaVersion 2. recordLaunch() appends that generation to a sibling
+ * owner-only ledger BEFORE spawn, so a parent crash leaves a launched
+ * generation without a terminal receipt: durable, never auto-cleared.
  */
 'use strict';
 
@@ -15,12 +20,28 @@ const path = require('node:path');
 const FIELDS = new Set(['directory', 'fileName', 'maxBytes']);
 const ERROR_CODE = /^GUARDIAN_[A-Z0-9_]{1,100}$/;
 const FILE_NAME = /^guardian-[a-z0-9-]{1,50}\.jsonl$/;
+const GENERATION = /^[0-9a-f]{32}$/;
 const MAX_RECORD_BYTES = 512;
+const LEGACY_KEYS = Object.freeze(['state', 'errorCode', 'hostStopped',
+  'activationAllowed', 'releaseAuthority', 'automaticRestartAllowed']);
+const BOUND_KEYS = Object.freeze([...LEGACY_KEYS, 'generationId']);
+const LAUNCH_KEYS = Object.freeze(['generationId', 'activationAllowed',
+  'releaseAuthority']);
 
 function code(message) {
   const err = new Error(message);
   err.code = message;
   return err;
+}
+// The ledger name is derived, never caller-selected, and deliberately does
+// not match the journal FILE_NAME pattern so one can never be read as the other.
+function generationLedgerName(fileName) {
+  return fileName.replace(/\.jsonl$/, '.generations.jsonl');
+}
+function exactKeys(value, keys) {
+  return !!value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((field) => Object.hasOwn(value, field));
 }
 
 function createGuardianLocalReceiptJournal(options) {
@@ -48,39 +69,13 @@ function createGuardianLocalReceiptJournal(options) {
   } catch (_) { throw code('GUARDIAN_JOURNAL_DIRECTORY_UNVERIFIED'); }
 
   const target = path.join(directory, options.fileName);
+  const ledger = path.join(directory, generationLedgerName(options.fileName));
   const flags = fs.constants.O_WRONLY | fs.constants.O_APPEND |
     fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
-  function append(receipt) {
-    const keys = ['state', 'errorCode', 'hostStopped',
-      'activationAllowed', 'releaseAuthority', 'automaticRestartAllowed'];
-    if (!receipt || typeof receipt !== 'object' ||
-        Array.isArray(receipt) ||
-        Object.keys(receipt).length !== keys.length ||
-        !keys.every((field) => Object.hasOwn(receipt, field)) ||
-        !['STOPPED', 'FAILED'].includes(receipt.state) ||
-        !(receipt.errorCode === null ||
-          (typeof receipt.errorCode === 'string' && ERROR_CODE.test(receipt.errorCode))) ||
-        receipt.hostStopped !== (receipt.state === 'STOPPED') ||
-        receipt.activationAllowed !== false ||
-        receipt.releaseAuthority !== 'NOT_ISSUED' ||
-        receipt.automaticRestartAllowed !== false) {
-      throw code('GUARDIAN_JOURNAL_RECEIPT_INVALID');
-    }
-    const data = Buffer.from(JSON.stringify({
-      schemaVersion: 1, eventId: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      state: receipt.state, errorCode: receipt.errorCode,
-      hostStopped: receipt.hostStopped,
-      activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
-      automaticRestartAllowed: false,
-    }) + '\n');
-    if (data.length > MAX_RECORD_BYTES) {
-      throw code('GUARDIAN_JOURNAL_RECEIPT_INVALID');
-    }
-
+  function write(file, data) {
     let fd;
     try {
-      fd = fs.openSync(target, flags, 0o600);
+      fd = fs.openSync(file, flags, 0o600);
       const stat = fs.fstatSync(fd);
       if (!stat.isFile() || stat.size > maxBytes - data.length ||
           (stat.mode & 0o077) !== 0 ||
@@ -96,10 +91,60 @@ function createGuardianLocalReceiptJournal(options) {
     } finally {
       if (fd !== undefined) fs.closeSync(fd);
     }
+  }
+  function append(receipt) {
+    // A receipt without generationId is a legacy, unbound v1 receipt: it
+    // remains readable history but can never close a launched generation.
+    const bound = exactKeys(receipt, BOUND_KEYS);
+    if (!(bound || exactKeys(receipt, LEGACY_KEYS)) ||
+        (bound && !(receipt.generationId === null ||
+          (typeof receipt.generationId === 'string' &&
+           GENERATION.test(receipt.generationId)))) ||
+        !['STOPPED', 'FAILED'].includes(receipt.state) ||
+        !(receipt.errorCode === null ||
+          (typeof receipt.errorCode === 'string' && ERROR_CODE.test(receipt.errorCode))) ||
+        receipt.hostStopped !== (receipt.state === 'STOPPED') ||
+        receipt.activationAllowed !== false ||
+        receipt.releaseAuthority !== 'NOT_ISSUED' ||
+        receipt.automaticRestartAllowed !== false) {
+      throw code('GUARDIAN_JOURNAL_RECEIPT_INVALID');
+    }
+    const data = Buffer.from(JSON.stringify({
+      schemaVersion: bound ? 2 : 1, eventId: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      ...(bound ? { generationId: receipt.generationId } : {}),
+      state: receipt.state, errorCode: receipt.errorCode,
+      hostStopped: receipt.hostStopped,
+      activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
+      automaticRestartAllowed: false,
+    }) + '\n');
+    if (data.length > MAX_RECORD_BYTES) {
+      throw code('GUARDIAN_JOURNAL_RECEIPT_INVALID');
+    }
+    write(target, data);
     return Object.freeze({ persisted: true,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
   }
-  return Object.freeze({ append });
+  // Synchronous, so the Controller refuses to spawn when it cannot persist.
+  function recordLaunch(launch) {
+    if (!exactKeys(launch, LAUNCH_KEYS) ||
+        typeof launch.generationId !== 'string' ||
+        !GENERATION.test(launch.generationId) ||
+        launch.activationAllowed !== false ||
+        launch.releaseAuthority !== 'NOT_ISSUED') {
+      throw code('GUARDIAN_JOURNAL_LAUNCH_INVALID');
+    }
+    write(ledger, Buffer.from(JSON.stringify({
+      schemaVersion: 1, kind: 'GUARDIAN_GENERATION_LAUNCH_V1',
+      eventId: crypto.randomUUID(), timestamp: new Date().toISOString(),
+      generationId: launch.generationId,
+      activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
+      automaticRestartAllowed: false,
+    }) + '\n'));
+    return Object.freeze({ persisted: true,
+      activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
+  }
+  return Object.freeze({ append, recordLaunch });
 }
 
-module.exports = { createGuardianLocalReceiptJournal };
+module.exports = { createGuardianLocalReceiptJournal, generationLedgerName };

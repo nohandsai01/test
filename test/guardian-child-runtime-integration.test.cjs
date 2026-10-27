@@ -88,15 +88,18 @@ test('real source-only Protected Host child starts, health-checks then terminate
     assertHold(end);
     const saved = observe(directory);
     assert.equal(saved.length, 1);
-    assert.equal(saved[0].schemaVersion, 1);
+    // G27: a controller-produced receipt is bound to its generation.
+    assert.equal(saved[0].schemaVersion, 2);
+    assert.equal(saved[0].generationId, end.generationId);
+    assert.match(saved[0].generationId, /^[0-9a-f]{32}$/);
     assert.equal(saved[0].state, 'STOPPED');
     assert.equal(saved[0].errorCode, null);
     assert.equal(saved[0].hostStopped, true);
     assertHold(saved[0]);
     assert.deepEqual(Object.keys(saved[0]).sort(), [
       'activationAllowed', 'automaticRestartAllowed', 'errorCode',
-      'eventId', 'hostStopped', 'releaseAuthority', 'schemaVersion',
-      'state', 'timestamp',
+      'eventId', 'generationId', 'hostStopped', 'releaseAuthority',
+      'schemaVersion', 'state', 'timestamp',
     ].sort());
     const file = path.join(directory, 'guardian-lifecycle.jsonl');
     assert.equal(fs.statSync(file).mode & 0o077, 0);
