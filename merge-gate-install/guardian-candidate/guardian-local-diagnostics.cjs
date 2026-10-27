@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { parseUniqueKeySourceLock } =
   require('../candidate/verify-source-lock.cjs');
-const { generationLedgerName } =
+const { generationLedgerName, observeLocalActiveGenerations } =
   require('./guardian-local-receipt-journal.cjs');
 
 const KEYS = new Set(['controller', 'directory', 'fileName', 'maxBytes']);
@@ -137,8 +137,15 @@ function createGuardianLocalDiagnostics(options) {
     } catch (_) { return false; }
   }
 
-function observed(reason, state, row, count, digest, rows = null, open = 0) {
-  return { observation: report(reason, state, row, count, digest), rows, open };
+function observed(reason, state, row, count, digest, rows = null,
+  open = 0, concurrent = 0, ledgerDigest = null) {
+  return { observation: report(reason, state, row, count, digest),
+    rows, open, concurrent, ledgerDigest };
+}
+function evidenceEvent(row) {
+  return Object.freeze({ eventId: row.eventId, timestamp: row.timestamp,
+    state: row.state, errorCode: row.errorCode,
+    generationId: row.schemaVersion === 2 ? row.generationId : null });
 }
 function shortEvent(row) {
   return Object.freeze({
@@ -209,9 +216,11 @@ function validateEvidenceRequest(input) {
 
 function evidenceEnvelope(observation, reason, details = null) {
   const valid = details !== null;
+  const bound = valid && details.generationId !== undefined;
   const fields = {
-    schemaVersion: 1,
-    kind: 'GUARDIAN_LOCAL_FAULT_EVIDENCE_V1',
+    schemaVersion: bound ? 2 : 1,
+    kind: bound ? 'GUARDIAN_LOCAL_FAULT_EVIDENCE_V2' :
+      'GUARDIAN_LOCAL_FAULT_EVIDENCE_V1',
     authority: 'LOCAL_UNAUTHENTICATED_OBSERVATION',
     status: 'SOURCE_ONLY_HOLD',
     availability: valid ? 'LOCAL_SNAPSHOT' : 'UNAVAILABLE',
@@ -224,6 +233,8 @@ function evidenceEnvelope(observation, reason, details = null) {
     journalSha256: valid ? observation.journalSha256 : null,
     failureCount: valid ? details.failureCount : 0,
     eventSequence: valid ? details.eventSequence : null,
+    ...(bound ? { generationId: details.generationId,
+      launchLedgerSha256: details.launchLedgerSha256 } : {}),
     selectedFailure: valid ? details.selectedFailure : null,
     previousReceipt: valid ? details.previousReceipt : null,
     nextReceipt: valid ? details.nextReceipt : null,
@@ -261,7 +272,8 @@ function evidenceEnvelope(observation, reason, details = null) {
     try {
       fd = fs.openSync(target, flags);
       const st0 = fs.fstatSync(fd);
-      if (!st0.isFile() || (st0.mode & 0o077) !== 0 ||
+      if (!st0.isFile() || st0.nlink !== 1 ||
+          (st0.mode & 0o077) !== 0 ||
           (typeof process.getuid === 'function' && st0.uid !== process.getuid()) ||
           st0.size < 1 || st0.size > maxBytes) {
         return { reason: 'FILE' };
@@ -281,11 +293,14 @@ function evidenceEnvelope(observation, reason, details = null) {
           st1.size !== st0.size || st1.mtimeMs !== st0.mtimeMs ||
           st1.ctimeMs !== st0.ctimeMs ||
           currentPath.dev !== st0.dev || currentPath.ino !== st0.ino ||
-          currentPath.isSymbolicLink() ||
+          currentPath.isSymbolicLink() || currentPath.nlink !== 1 ||
           (currentPath.mode & 0o077) !== 0) {
         return { reason: 'CHANGED' };
       }
-      return { buffer };
+      return { buffer, identity: Object.freeze({
+        dev: st0.dev, ino: st0.ino, size: st0.size,
+        mtimeMs: st0.mtimeMs, ctimeMs: st0.ctimeMs,
+      }) };
     } catch (error) {
       return { reason: error?.code === 'ENOENT' ? 'MISSING' : 'READ' };
     } finally {
@@ -293,6 +308,19 @@ function evidenceEnvelope(observation, reason, details = null) {
         try { fs.closeSync(fd); } catch (_) {}
       }
     }
+  }
+  // A pair of independently protected snapshots is accepted only when
+  // both records were byte-identical on two bracketing reads. Missing on
+  // both is represented explicitly; missing -> present is never a baseline.
+  function sameFileRead(a, b) {
+    if (a.buffer && b.buffer) return a.buffer.equals(b.buffer) &&
+      a.identity.dev === b.identity.dev &&
+      a.identity.ino === b.identity.ino &&
+      a.identity.size === b.identity.size &&
+      a.identity.mtimeMs === b.identity.mtimeMs &&
+      a.identity.ctimeMs === b.identity.ctimeMs;
+    return !a.buffer && !b.buffer && a.reason === 'MISSING' &&
+      b.reason === 'MISSING';
   }
   function parseLines(buffer, validate) {
     if (!buffer || !buffer.length || buffer[buffer.length - 1] !== 10 ||
@@ -316,42 +344,46 @@ function evidenceEnvelope(observation, reason, details = null) {
       return rows;
     } catch (_) { return null; }
   }
-  // G28-G30: join terminal receipts to the durable launch ledger. Returns
-  // null when the two stores are inconsistent (P0), otherwise the number of
-  // launched generations that never produced a terminal receipt, excluding
-  // only the controller's own still-live generation.
-  function unterminatedGenerations(rows, launches, current) {
+  // A missing terminal is P1 only when it cannot be linked to a live
+  // generation explicitly witnessed within THIS Node process. Other
+  // concurrent local sessions stay P2/HOLD instead of a false crash P1.
+  // A different process never contributes an unverified PID/age witness.
+  function unterminatedGenerations(rows, launches, current, localLive) {
     const terminated = new Set();
     for (const row of rows) {
       if (row.schemaVersion !== 2 || row.generationId === null) continue;
-      // One generation, one terminal receipt: a second is a replay.
       if (terminated.has(row.generationId)) return null;
       terminated.add(row.generationId);
     }
     if (launches === null) {
-      // Unledgered (legacy or un-wired) history. A generation-bound receipt
-      // without its ledger cannot be reconciled, so it is never clean.
       return terminated.size === 0 && (current.generationId === null ||
-        !LIVE_STATES.has(current.state)) ? 0 : null;
+        !LIVE_STATES.has(current.state)) ?
+        Object.freeze({ open: 0, concurrent: 0 }) : null;
     }
     const launched = new Set();
     for (const row of launches) {
-      if (launched.has(row.generationId)) return null; // reused generation
+      if (launched.has(row.generationId)) return null;
       launched.add(row.generationId);
     }
     for (const id of terminated) {
-      if (!launched.has(id)) return null; // terminal for unknown generation
+      if (!launched.has(id)) return null;
     }
     if (current.generationId !== null && !launched.has(current.generationId)) {
       return null;
     }
-    let open = 0;
+    const witnessed = new Set(localLive);
+    for (const id of witnessed) {
+      // A witness for a missing/terminated ledger ID is itself inconsistent.
+      if (!launched.has(id) || terminated.has(id)) return null;
+    }
+    let open = 0, concurrent = 0;
     for (const id of launched) {
       if (terminated.has(id)) continue;
       if (id === current.generationId && LIVE_STATES.has(current.state)) continue;
-      open++;
+      if (witnessed.has(id)) concurrent++;
+      else open++;
     }
-    return open;
+    return Object.freeze({ open, concurrent });
   }
   function readSnapshot() {
     const beforeStatus = safeController(options.controller);
@@ -396,6 +428,16 @@ function evidenceEnvelope(observation, reason, details = null) {
         before, null, 0, null);
     }
 
+    // G31: independent second reads close the journal/ledger gap. The
+    // comparison intentionally does NOT retry or silently reconcile a
+    // different version: this is an observation, never a transaction.
+    const journalConfirm = readStable(file);
+    const ledgerConfirm = readStable(ledgerFile);
+    if (!sameFileRead(journalRead, journalConfirm) ||
+        !sameFileRead(ledgerRead, ledgerConfirm)) {
+      return observed('GUARDIAN_DIAGNOSTICS_PAIR_CHANGED_DURING_READ',
+        before, null, 0, null);
+    }
     if (!directoryTrusted()) {
       return observed('GUARDIAN_DIAGNOSTICS_DIRECTORY_UNVERIFIED',
         before, null, 0, null);
@@ -406,17 +448,25 @@ function evidenceEnvelope(observation, reason, details = null) {
       return observed('GUARDIAN_DIAGNOSTICS_CONTROLLER_CHANGED_DURING_READ',
         afterStatus?.state ?? 'UNVERIFIED', null, 0, null);
     }
-    const open = unterminatedGenerations(rows, launches, beforeStatus);
-    if (open === null) {
+    const localLive = observeLocalActiveGenerations(directory, options.fileName);
+    const continuity = unterminatedGenerations(rows, launches,
+      beforeStatus, localLive);
+    if (continuity === null) {
       return observed('GUARDIAN_DIAGNOSTICS_GENERATION_INCONSISTENT',
         before, null, 0, null);
     }
+    const { open, concurrent } = continuity;
+    const ledgerDigest = ledgerRead.buffer ?
+      crypto.createHash('sha256').update(ledgerRead.buffer).digest('hex') : null;
     if (!buffer) {
-      return open > 0 ?
-        observed('GUARDIAN_DIAGNOSTICS_GENERATION_UNTERMINATED',
-          before, null, 0, null, rows, open) :
-        observed('GUARDIAN_DIAGNOSTICS_JOURNAL_MISSING',
-          before, null, 0, null);
+      if (open > 0) return observed(
+        'GUARDIAN_DIAGNOSTICS_GENERATION_UNTERMINATED',
+        before, null, 0, null, rows, open, concurrent, ledgerDigest);
+      if (concurrent > 0) return observed(
+        'GUARDIAN_DIAGNOSTICS_CONCURRENT_GENERATION_OBSERVED',
+        before, null, 0, null, rows, open, concurrent, ledgerDigest);
+      return observed('GUARDIAN_DIAGNOSTICS_JOURNAL_MISSING',
+        before, null, 0, null);
     }
     const last = rows[rows.length - 1];
     const digest = crypto.createHash('sha256').update(buffer).digest('hex');
@@ -424,24 +474,28 @@ function evidenceEnvelope(observation, reason, details = null) {
     // adjudication clearing any earlier recorded fault. Preserve manual HOLD.
     if (rows.some((entry) => entry.state === 'FAILED')) {
       return observed('GUARDIAN_DIAGNOSTICS_MANUAL_RECOVERY_REQUIRED',
-        before, last, rows.length, digest, rows, open);
+        before, last, rows.length, digest, rows, open, concurrent, ledgerDigest);
     }
     // A launched generation with no terminal receipt is an interrupted
     // parent/child lifecycle. A newer clean generation never clears it.
     if (open > 0) {
       return observed('GUARDIAN_DIAGNOSTICS_GENERATION_UNTERMINATED',
-        before, last, rows.length, digest, rows, open);
+        before, last, rows.length, digest, rows, open, concurrent, ledgerDigest);
+    }
+    if (concurrent > 0) {
+      return observed('GUARDIAN_DIAGNOSTICS_CONCURRENT_GENERATION_OBSERVED',
+        before, last, rows.length, digest, rows, open, concurrent, ledgerDigest);
     }
     if (before === 'STOPPED' && last.state === 'STOPPED') {
       return observed('GUARDIAN_DIAGNOSTICS_CLEAN_STOP',
-        before, last, rows.length, digest, rows, open);
+        before, last, rows.length, digest, rows, open, concurrent, ledgerDigest);
     }
     if (before === 'FAILED' || last.state === 'FAILED') {
       return observed('GUARDIAN_DIAGNOSTICS_MANUAL_RECOVERY_REQUIRED',
-        before, last, rows.length, digest, rows, open);
+        before, last, rows.length, digest, rows, open, concurrent, ledgerDigest);
     }
     return observed('GUARDIAN_DIAGNOSTICS_INCONCLUSIVE',
-      before, last, rows.length, digest, rows, open);
+      before, last, rows.length, digest, rows, open, concurrent, ledgerDigest);
   }
   function inspect() { return readSnapshot().observation; }
 
@@ -488,7 +542,7 @@ function evidenceEnvelope(observation, reason, details = null) {
   // tamper-proof provenance claim; local Owner/Operator ACLs still matter.
   function incidentEvidence(options = {}) {
     const { eventId, expectedDigest } = validateEvidenceRequest(options);
-    const { observation, rows } = readSnapshot();
+    const { observation, rows, ledgerDigest } = readSnapshot();
     if (!rows) {
       return evidenceEnvelope(observation,
         'GUARDIAN_EVIDENCE_SOURCE_UNVERIFIED');
@@ -517,16 +571,24 @@ function evidenceEnvelope(observation, reason, details = null) {
       return evidenceEnvelope(observation,
         'GUARDIAN_EVIDENCE_EVENT_NOT_FAILURE');
     }
+    const bound = rows[index].schemaVersion === 2;
+    if (bound && (rows[index].generationId === null || !ledgerDigest)) {
+      return evidenceEnvelope(observation,
+        'GUARDIAN_EVIDENCE_GENERATION_UNVERIFIED');
+    }
+    const select = bound ? evidenceEvent : shortEvent;
     return evidenceEnvelope(observation,
       'GUARDIAN_EVIDENCE_FAULT_RECORDED', Object.freeze({
         failureCount: failureIndexes.length,
         eventSequence: index + 1,
-        selectedFailure: shortEvent(rows[index]),
-        previousReceipt: index > 0 ? shortEvent(rows[index - 1]) : null,
+        ...(bound ? { generationId: rows[index].generationId,
+          launchLedgerSha256: ledgerDigest } : {}),
+        selectedFailure: select(rows[index]),
+        previousReceipt: index > 0 ? select(rows[index - 1]) : null,
         nextReceipt: index + 1 < rows.length ?
-          shortEvent(rows[index + 1]) : null,
-        firstFailure: shortEvent(rows[failureIndexes[0]]),
-        latestFailure: shortEvent(rows[failureIndexes[failureIndexes.length - 1]]),
+          select(rows[index + 1]) : null,
+        firstFailure: select(rows[failureIndexes[0]]),
+        latestFailure: select(rows[failureIndexes[failureIndexes.length - 1]]),
       }));
   }
   // A single protected snapshot powers this bounded, read-only manual
@@ -534,7 +596,7 @@ function evidenceEnvelope(observation, reason, details = null) {
   // TO PERFORM FIRST, not verified tampering or permission to reactivate.
   // All diagnostic fields come from the same stable journal read.
   function faultTriage() {
-    const { observation, rows, open } = readSnapshot();
+    const { observation, rows, open, concurrent } = readSnapshot();
     let priority, classification, nextAction;
     let failureCount = 0, firstFailure = null, latestFailure = null;
     if (!rows) {
@@ -596,6 +658,7 @@ function evidenceEnvelope(observation, reason, details = null) {
       journalSha256: rows ? observation.journalSha256 : null,
       failureCount,
       unterminatedGenerations: rows ? open : 0,
+      concurrentGenerations: rows ? concurrent : 0,
       firstFailure,
       latestFailure,
       lastTerminal: rows ? observation.lastTerminal : null,
