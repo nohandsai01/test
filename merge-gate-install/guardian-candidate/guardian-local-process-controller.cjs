@@ -23,7 +23,8 @@ const path = require('node:path');
 
 const PROTOCOL = 'NOHANDS_GUARDIAN_CHILD_V2';
 const ALLOWED = new Set(['entrypoint', 'cwd', 'startupTimeoutMs',
-  'shutdownTimeoutMs', 'healthProbeTimeoutMs', 'onTerminal', 'onLaunch']);
+  'shutdownTimeoutMs', 'healthProbeTimeoutMs', 'onTerminal', 'onLaunch',
+  'onReady']);
 const MIN_WAIT = 50;
 const MAX_WAIT = 30_000;
 const GENERATION = /^[0-9a-f]{32}$/;
@@ -136,7 +137,9 @@ function createGuardianLocalProcessController(options) {
       typeof options.entrypoint !== 'string' ||
       typeof options.onTerminal !== 'function' ||
       (options.onLaunch !== undefined &&
-        typeof options.onLaunch !== 'function')) {
+        typeof options.onLaunch !== 'function') ||
+      (options.onReady !== undefined &&
+        typeof options.onReady !== 'function')) {
     throw new GuardianChildControllerError('GUARDIAN_CHILD_CONFIG_INVALID');
   }
   let canonicalCwd;
@@ -301,6 +304,21 @@ function createGuardianLocalProcessController(options) {
     if (!gotReady && readyFrame(payload) && !gotTerminal) {
       gotReady = true;
       if (!expectedExit && !notified) {
+        if (options.onReady) {
+          try {
+            const proof = options.onReady(Object.freeze({
+              generationId: generation, activationAllowed: false,
+              releaseAuthority: 'NOT_ISSUED',
+            }));
+            if (proof && typeof proof.then === 'function') {
+              Promise.resolve(proof).catch(() => {});
+              throw new Error('async readiness unsupported');
+            }
+          } catch (_) {
+            fail('GUARDIAN_CHILD_READY_RECORD_FAILED');
+            return;
+          }
+        }
         state = 'RUNNING';
         settleStart?.(stateView());
       }

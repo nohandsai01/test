@@ -44,6 +44,17 @@ function exactKeys(value, keys) {
     keys.every((field) => Object.hasOwn(value, field));
 }
 
+// Volatile same-process witness only. A launch is marked active AFTER its
+// durable ledger append; terminal attempts remove it even on failed journal
+// writes. This is not an OS attestation or a cross-process liveness lease.
+const activeByJournal = new Map();
+function localWitnessKey(directory, filename) {
+  return path.join(directory, filename);
+}
+function observeLocalActiveGenerations(directory, fileName) {
+  const active = activeByJournal.get(localWitnessKey(directory, fileName));
+  return Object.freeze(active ? [...active] : []);
+}
 function createGuardianLocalReceiptJournal(options) {
   if (!options || typeof options !== 'object' ||
       Array.isArray(options) ||
@@ -70,6 +81,22 @@ function createGuardianLocalReceiptJournal(options) {
 
   const target = path.join(directory, options.fileName);
   const ledger = path.join(directory, generationLedgerName(options.fileName));
+  const witnessKey = localWitnessKey(directory, options.fileName);
+  const pendingLaunches = new Set();
+  function markActive(id) {
+    let active = activeByJournal.get(witnessKey);
+    if (!active) {
+      active = new Set();
+      activeByJournal.set(witnessKey, active);
+    }
+    active.add(id);
+  }
+  function retire(id) {
+    const active = activeByJournal.get(witnessKey);
+    if (!active) return;
+    active.delete(id);
+    if (active.size === 0) activeByJournal.delete(witnessKey);
+  }
   const flags = fs.constants.O_WRONLY | fs.constants.O_APPEND |
     fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
   function write(file, data) {
@@ -121,6 +148,13 @@ function createGuardianLocalReceiptJournal(options) {
     if (data.length > MAX_RECORD_BYTES) {
       throw code('GUARDIAN_JOURNAL_RECEIPT_INVALID');
     }
+    // A completed/failed child is no longer a live witness even when
+    // writing its terminal record fails. The missing terminal will then
+    // remain a P1 owner-reconciliation HOLD.
+    if (bound && receipt.generationId !== null) {
+      pendingLaunches.delete(receipt.generationId);
+      retire(receipt.generationId);
+    }
     write(target, data);
     return Object.freeze({ persisted: true,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
@@ -141,10 +175,29 @@ function createGuardianLocalReceiptJournal(options) {
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
       automaticRestartAllowed: false,
     }) + '\n'));
+    pendingLaunches.add(launch.generationId);
     return Object.freeze({ persisted: true,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
   }
-  return Object.freeze({ append, recordLaunch });
+  // Unlike Launch, a verified parent-side V2 READY means this specific
+  // owned child reached RUNNING. Keep only a volatile local witness and
+  // refuse any READY not preceded by this instance's durable Launch.
+  function recordReady(ready) {
+    if (!exactKeys(ready, LAUNCH_KEYS) ||
+        typeof ready.generationId !== 'string' ||
+        !GENERATION.test(ready.generationId) ||
+        ready.activationAllowed !== false ||
+        ready.releaseAuthority !== 'NOT_ISSUED' ||
+        !pendingLaunches.has(ready.generationId)) {
+      throw code('GUARDIAN_JOURNAL_READY_INVALID');
+    }
+    pendingLaunches.delete(ready.generationId);
+    markActive(ready.generationId);
+    return Object.freeze({ witnessed: true,
+      activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
+  }
+  return Object.freeze({ append, recordLaunch, recordReady });
 }
 
-module.exports = { createGuardianLocalReceiptJournal, generationLedgerName };
+module.exports = { createGuardianLocalReceiptJournal, generationLedgerName,
+  observeLocalActiveGenerations };
