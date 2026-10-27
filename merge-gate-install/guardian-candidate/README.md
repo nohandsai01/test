@@ -1229,3 +1229,37 @@ negative scenarios for stale probe, state/PID drift, malformed response,
 probe failure, concurrent requests, read-only passive inspection and invalid
 configuration. No reviewer, production D1, GitHub App, Check issue, Merge,
 Deploy, permission change or credentials are part of this batch.
+
+
+## G25 — Operator passive runtime assessment and fault priority (source-only)
+
+The isolated Operator facade now exposes assessRuntime(), a **synchronous,
+read-only** fusion of existing faultTriage() and observeRuntimeHealth().
+It is not a health probe, daemon monitor, liveness certification, Check
+publisher, recovery action or permission to clear HOLD. It creates no new
+credentials and does not alter the owner-controlled start/stop methods.
+
+The assessment brackets those two readings with sanitized Controller status
+snapshots. A changed state/PID/error, malformed or inconsistent evidence,
+exception or unexpected authority field forces P0
+LOCAL_OBSERVATION_UNVERIFIED with an owner-only investigation recommendation.
+Only whitelist primitives from either underlying source reach the result;
+raw receipts, child PID, filesystem paths, tokens, exceptions and secrets are
+not included. The facade performs no IPC or probeRuntime() call.
+
+P0 invalid/uncertain evidence and P1 recorded historic faults retain their
+existing priority regardless of a recent local probe. P2 RUNNING observations
+are distinguished as RECENT_LOCAL_PROBE_ONLY, LOCAL_PROBE_EXPIRED or
+NO_VERIFIED_HEALTH_SAMPLE to guide which local read the owner should request;
+all remain manual-intervention and SOURCE_ONLY_HOLD. Clean stopped P3 remains
+only a local observation; no restart/activation/Check authority is granted.
+Health samples are bounded by their original volatile monotonic freshness
+window. There is no assurance the process stayed healthy between or after
+the two reads, nor protection against an already compromised local process or
+an attacker who can rewrite both local files and baselines.
+
+Tests cover a real protected child lifecycle with an isolated temporary
+journal plus deterministic P0/P1/P2/P3, freshness, malformed fields, controller
+drift, no-side-effects and exception/non-leakage scenarios. Hosted D1,
+production process identity, GitHub App Check signer, independent QA and
+deployment acceptance remain outside this source-only development batch.
