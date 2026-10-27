@@ -1525,3 +1525,55 @@ that return to identical state between reads, same-UID compromise or
 forged full-file histories. A protected, separately authorized external
 anchor would be needed to close that trust gap; this work does NOT
 create or register one.
+
+
+## G33 — Source-only external baseline READ-ONLY verification interface
+
+The inert guardian-external-baseline-verifier.cjs module defines
+createGuardianExternalBaselineVerifier for an OWNER-SUPPLIED, previously
+pinned ED25519 SPKI public key and SHA-256 fingerprint, fixed anchorId,
+owner-only journal directory and derived sibling generation ledger.
+No key generation, key registration, remote trust registry, crypto key
+management, signing service, deployment, D1, GitHub App or Check writes
+are performed by this source module.
+
+The input is a bounded UTF-8 JSON TEXT envelope only, never a filesystem
+path or provider object. Required exact fields: schemaVersion=1, kind,
+scope=NOHANDS_GUARDIAN_GENERATION_PAIR_SOURCE_ONLY, anchorId,
+sequence (positive safe integer), observedAt (strict UTC ISO timestamp),
+journalSha256, ledgerSha256, journalBytes, ledgerBytes,
+algorithm=Ed25519, signatureBase64. Signing uses domain-separated
+NOHANDS_GUARDIAN_EXTERNAL_BASELINE_V1 followed by newline and the
+fixed-order JSON of the preceding unsigned fields. This source-only
+module verifies the signature against an owner-supplied pinned public
+key (SPKI SHA-256) and prevents reuse of a sequence number within the
+same verifier instance, but cannot prove public-key trust provenance,
+real signing authority, durable antirollback or wall-clock freshness.
+
+A valid signature is insufficient: the verifier must independently
+read both local files in owner-only directories via O_RDONLY and
+O_NOFOLLOW, compare complete SHA-256 and byte lengths against the
+signed envelope, validate generation ledger vs terminal journal with
+existing G31 Diagnostics, then read BOTH files again and require
+identical bytes, inode, metadata, permissions and owner scope.
+Any missing, malformed, truncated, replaced, mismatched or racing
+source returns NOT_VERIFIED and SOURCE_ONLY_HOLD. No retry, automatic
+repair, credential use or HOLD clearing can occur.
+
+A successful local comparison returns
+LOCAL_SIGNATURE_AND_PAIR_MATCH_ONLY with
+pinnedSignerSignatureValid=true, but **externalAnchorVerified=false,
+historicalCompletenessVerified=false, custodyVerified=false,
+liveness=NOT_PROVEN, releaseAuthority=NOT_ISSUED**. An attacker who
+controls the public-key pin can create a different apparently valid
+test key and signature, hence this interface must never self-enroll
+or self-authorize external trust. Production publisher identity,
+external append-only custody, signer approval and immutable baseline
+must be separately authorized and independently verified.
+
+Tests generate ephemeral Ed25519 keypairs only IN THE TEST FIXTURE,
+without persisting or provisioning a real key; they cover real owner-
+only JSONL records, forged or changed signed fields, invalid pin,
+wrong anchor, sequence replay, malformed nested JSON, symlink/hardlink
+or permission defects, ledger corruption and in-flight changes.
+No real trusted anchor, payment, Merge, Deploy, Check or app mutation.
