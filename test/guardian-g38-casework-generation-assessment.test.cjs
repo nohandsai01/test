@@ -3,6 +3,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
+const crypto=require('node:crypto');
 const os=require('node:os');
 const path=require('node:path');
 const {createGuardianLocalOperatorSession}=require(
@@ -219,6 +220,65 @@ test('G38 casework diagnostics re-read catches mid-inspection rewrite before a c
       assert.equal(result.reason,'GUARDIAN_DIAG_CHANGED_DURING_READ');
     } finally {
       fs.openSync=realOpen;
+    }
+  });
+});
+
+// G39: a digest is not sufficient when the caller can supply the JSON body.
+// The Operator bridge must validate ALL nested receipt fields and audit counts.
+function rehashBrief(brief,changes) {
+  const {briefSha256:_ignored,...content}={...brief,...changes};
+  return Object.freeze({...content,briefSha256:crypto.createHash('sha256')
+    .update(JSON.stringify(content)).digest('hex')});
+}
+test('G39 rejects forged trailing events even with recomputed brief SHA',async()=>{
+  await fixture(async f=>{
+    await stoppedCase(f);
+    const op=f.session.operator, brief=op.captureOfflineIncidentBrief();
+    const altered=[
+      {eventId:'NOT_AN_EVENT',timestamp:'2026-02-30T00:00:00.000Z',
+        state:'STOPPED',errorCode:null},
+      {...brief.events[0]},
+    ];
+    for (const extra of altered) {
+      const poisoned=rehashBrief(brief,{events:Object.freeze([
+        ...brief.events,extra,
+      ])});
+      const out=makeAssessor(f,{operator:{
+        assessRuntime:()=>op.assessRuntime(),
+        captureOfflineIncidentBrief:()=>poisoned,
+        auditCompleteEventLedger:()=>op.auditCompleteEventLedger(),
+      }}).assess();
+      checkHold(out);
+      assert.equal(out.classification,'NOT_VERIFIED');
+      assert.equal(out.caseworkCounts,null);
+    }
+  });
+});
+test('G39 rejects unverified audit error-code totals and forged failures',async()=>{
+  await fixture(async f=>{
+    await stoppedCase(f);
+    const op=f.session.operator, audit=op.auditCompleteEventLedger();
+    const poisons=[
+      {...audit,failureCodes:[{code:'GUARDIAN_IMAGINARY',count:1}]},
+      {...audit,failureCodes:[{code:'UNSPECIFIED',count:0}]},
+      {...audit,failureCodes:[{code:'UNSPECIFIED',count:1,
+        token:'DO_NOT_ECHO'}]},
+      {...audit,firstFailure:{...audit.lastTerminal,state:'FAILED',
+        errorCode:'GUARDIAN_IMAGINARY'}},
+      {...audit,lastTerminal:{...audit.lastTerminal,
+        timestamp:'2026-02-30T00:00:00.000Z'}},
+    ];
+    for (const poisoned of poisons) {
+      const out=makeAssessor(f,{operator:{
+        assessRuntime:()=>op.assessRuntime(),
+        captureOfflineIncidentBrief:()=>op.captureOfflineIncidentBrief(),
+        auditCompleteEventLedger:()=>poisoned,
+      }}).assess();
+      checkHold(out);
+      assert.equal(out.classification,'NOT_VERIFIED');
+      assert.equal(out.reason,'GUARDIAN_CORRELATION_SNAPSHOTS_CHANGED');
+      assert.equal(JSON.stringify(out).includes('DO_NOT_ECHO'),false);
     }
   });
 });

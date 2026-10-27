@@ -100,12 +100,36 @@ function validRuntime(raw) {
     failures:x.historicalFailureCount,
     generations:x.unterminatedGenerations??null});
 }
+function validUtc(value) {
+  if (typeof value!=='string' ||
+      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)) return false;
+  try {return new Date(value).toISOString()===value;}
+  catch (_) {return false;}
+}
+function denseEvents(raw) {
+  if (!Array.isArray(raw)) return null;
+  try {
+    const owns=Reflect.ownKeys(raw), desc=Object.getOwnPropertyDescriptors(raw);
+    const length=desc.length?.value;
+    if (!Number.isSafeInteger(length) || length<1 || length>10 ||
+        owns.length!==length+1 ||
+        owns.some(k=>k!=='length' &&
+          !(typeof k==='string' && /^(0|[1-9]\d*)$/.test(k) &&
+            Number(k)<length))) return null;
+    const events=[], ids=new Set();
+    for(let i=0;i<length;i++) {
+      const d=desc[i];
+      if (!d || !Object.hasOwn(d,'value') || d.enumerable!==true) return null;
+      const event=validEvent(d.value);
+      if (!event || ids.has(event.eventId)) return null;
+      ids.add(event.eventId); events.push(event);
+    }
+    return Object.freeze(events);
+  } catch (_) {return null;}
+}
 function validEvent(raw) {
   const x=exact(raw,EVENT_KEYS);
-  if (!x || !UUID.test(x.eventId??'') ||
-      typeof x.timestamp!=='string' ||
-      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x.timestamp) ||
-      !Number.isFinite(Date.parse(x.timestamp)) ||
+  if (!x || !UUID.test(x.eventId??'') || !validUtc(x.timestamp) ||
       !['FAILED','STOPPED'].includes(x.state) ||
       (x.state==='STOPPED' && x.errorCode!==null) ||
       (x.state==='FAILED' && !CODE.test(x.errorCode??''))) return null;
@@ -126,18 +150,20 @@ function validBrief(raw) {
       x.manualInterventionRequired!==true ||
       !Array.isArray(x.events) || x.events.length<1 || x.events.length>10 ||
       !SHA.test(x.briefSha256??'')) return null;
-  const desc=Object.getOwnPropertyDescriptors(x.events);
-  if (Reflect.ownKeys(x.events).length!==x.events.length+1 ||
-      x.events.some((_,i)=>!desc[i] ||
-        !Object.hasOwn(desc[i],'value') || !validEvent(desc[i].value))) return null;
+  // Snapshot every nested event once before hashing. A caller-controlled
+  // accessor, sparse array, duplicate ID or proxy must never mint a brief.
+  const events=denseEvents(x.events);
+  if (!events) return null;
   const original={};
-  for(const key of BRIEF_KEYS.slice(0,-1)) original[key]=x[key];
+  for(const key of BRIEF_KEYS.slice(0,-1)) {
+    original[key]=key==='events'?events:x[key];
+  }
   if (crypto.createHash('sha256').update(JSON.stringify(original))
     .digest('hex')!==x.briefSha256) return null;
   return Object.freeze({priority:x.priority,state:x.processState,
     sha:x.journalSha256,entries:x.journalEntries,
     failures:x.historicalFailureCount,briefSha:x.briefSha256,
-    newest:validEvent(desc[0].value)});
+    newest:events[0]});
 }
 function validAudit(raw) {
   const x=exact(raw,AUDIT_KEYS);
@@ -154,13 +180,42 @@ function validAudit(raw) {
       x.inspectedPages<1 || x.inspectedPages>x.inspectedEntries ||
       !Number.isSafeInteger(x.failureCount) ||
       x.failureCount<0 || x.failureCount>x.inspectedEntries ||
-      x.manualInterventionRequired!==true ||
-      !Array.isArray(x.failureCodes) ||
-      !validEvent(x.lastTerminal)) return null;
+      x.manualInterventionRequired!==true) return null;
+  // The upstream complete-ledger audit already checks every page. Validate
+  // its entire redacted aggregate here, not only the headline failure count.
+  if (!Array.isArray(x.failureCodes) ||
+      Reflect.ownKeys(x.failureCodes).length!==x.failureCodes.length+1 ||
+      x.failureCodes.length>x.failureCount) return null;
+  const codes=new Map();
+  let sum=0;
+  for (let i=0;i<x.failureCodes.length;i++) {
+    const desc=Object.getOwnPropertyDescriptor(x.failureCodes,String(i));
+    if (!desc || !Object.hasOwn(desc,'value') || !desc.enumerable) return null;
+    const entry=exact(desc.value,['code','count']);
+    if (!entry || !(entry.code==='UNSPECIFIED' || CODE.test(entry.code??'')) ||
+        codes.has(entry.code) || !Number.isSafeInteger(entry.count) ||
+        entry.count<1 || entry.count>x.failureCount) return null;
+    codes.set(entry.code,entry.count);
+    sum+=entry.count;
+  }
+  if (sum!==x.failureCount) return null;
+  const first=x.firstFailure===null?null:validEvent(x.firstFailure);
+  const latest=x.latestFailure===null?null:validEvent(x.latestFailure);
+  const newest=validEvent(x.lastTerminal);
+  if (!newest ||
+      (x.failureCount===0 && (first!==null || latest!==null ||
+        newest.state==='FAILED')) ||
+      (x.failureCount>0 && (!first || !latest ||
+        first.state!=='FAILED' || latest.state!=='FAILED' ||
+        !codes.has(first.errorCode??'UNSPECIFIED') ||
+        !codes.has(latest.errorCode??'UNSPECIFIED'))) ||
+      (x.failureCount===1 && !equal(first,latest,EVENT_KEYS)) ||
+      (x.failureCount>1 && first.eventId===latest.eventId) ||
+      (newest.state==='FAILED' &&
+        (!latest || !equal(newest,latest,EVENT_KEYS)))) return null;
   return Object.freeze({state:x.processState,sha:x.journalSha256,
     entries:x.inspectedEntries,failures:x.failureCount,
-    orderedSha:x.orderedEventsSha256,
-    newest:validEvent(x.lastTerminal)});
+    orderedSha:x.orderedEventsSha256,newest});
 }
 function equal(a,b,fields) {
   return a&&b&&fields.every(k=>a[k]===b[k]);
