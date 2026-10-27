@@ -1408,3 +1408,37 @@ privileged same-UID tampering, deletion of BOTH journals before a
 new observer starts and absence of a trusted external anchor remain
 outside the proof. V1/V2 compatibility and fail-closed HOLD remain.
 No live D1/App/Check/credential/Deploy or Merge is authorized.
+
+
+## G32 — ephemeral, read-only local generation baseline witness
+
+guardian-local-baseline-witness.cjs is an isolated, inert observer
+createGuardianLocalBaselineWitness({directory,fileName,maxBytes?}).
+It does not make an authoritative baseline, generate signing material,
+write/repair anything, lock files, start/restart processes, publish
+Checks or mutate an existing owner/Operator session.
+
+- On the FIRST inspection, both missing files return
+  UNATTESTED_DUAL_ABSENCE / NOT_VERIFIED. Both present and structurally
+  consistent files can establish only an UNANCHORED local memory snapshot
+  (no historical completeness or protected external anchor).
+- The SAME observer requires every later Journal and Ledger snapshot to
+  retain its prior bytes as a prefix on the SAME owner-only regular-file
+  inode. A missing/replaced/truncated file, lost permissions, invalid
+  record, or in-flight pair drift permanently latches the observer to
+  HOLD, even if the original content later reappears.
+- Each observation validates both files through protected local
+  Diagnostics and separate before/after owner-only path/inode/byte
+  checks. All results retain custodyVerified=false,
+  externalAnchorVerified=false, historicalCompletenessVerified=false,
+  liveness=NOT_PROVEN, automaticRestartAllowed=false and
+  releaseAuthority=NOT_ISSUED.
+
+**Non-claims:** A NEW observer cannot distinguish an installation whose
+two files were deleted before the observer started from a never-used
+installation. A source-only in-memory witness is not durable custody,
+cannot survive process restart and cannot rule out ABA modifications
+that return to identical state between reads, same-UID compromise or
+forged full-file histories. A protected, separately authorized external
+anchor would be needed to close that trust gap; this work does NOT
+create or register one.
