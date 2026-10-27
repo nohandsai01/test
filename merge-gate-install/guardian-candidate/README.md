@@ -1652,3 +1652,25 @@ checksum does not authenticate their identity or establish causality.
 Two-point observations cannot exclude a fast ABA mutation. No signing keys,
 background processes, network, D1, Check publication, HOLD release, Merge
 or Deploy are part of this isolated source batch.
+
+### G42 — optional Casework V2 terminal event-content pin (source-only HOLD)
+
+G41's exact legacy V2 claim remains supported unchanged. An opt-in extended
+GUARDIAN_CASEWORK_GENERATION_CLAIM_V2 also accepts terminalEventSha256
+**between** terminalEventId and generationId in the fixed-order manifest
+hash. It is SHA-256 of JSON-serialized selectedFailure with exactly these
+ordered keys: eventId, timestamp, state, errorCode, generationId.
+The selected event comes from the independently verified, twice-read
+Generation V2 evidence packet, not from the untrusted manifest. Invalid
+timestamp/error-code types, missing/extra claim fields, getter-bearing
+claims, wrong event content, and rehashed-but-mismatched claims fail P0.
+
+On extended-claim local matches only, the assessment includes
+terminalEventSha256 and eventContentBinding =
+LOCAL_UNAUTHENTICATED_CONTENT_MATCH_ONLY. Legacy claims do not acquire
+these fields or stronger semantic claims. Both paths stay SOURCE_ONLY_HOLD:
+the checksum is **not** a signature, causal proof, trustworthy historical
+custody, immutable ledger attestation, or release authority. Same-UID file
+writers and ABA changes between observations remain outside the local
+integrity model. No production credentials, real Check, Merge, Deploy, D1,
+or Ruleset changes are required or authorized by this source-only feature.

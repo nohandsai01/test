@@ -21,6 +21,15 @@ const CLAIM_KEYS=Object.freeze([
   'caseworkJournalSha256','terminalEventId','generationId',
   'terminalJournalSha256','launchLedgerSha256',
 ]);
+// Backwards-compatible G42 claim extension: pin canonical selectedFailure
+// content, not only its eventId and the encompassing local journal bytes.
+const CONTENT_CLAIM_KEYS=Object.freeze([
+  ...CLAIM_KEYS.slice(0,CLAIM_KEYS.indexOf('generationId')),
+  'terminalEventSha256',
+  ...CLAIM_KEYS.slice(CLAIM_KEYS.indexOf('generationId')),
+]);
+const TIMESTAMP=/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+const ERROR_CODE=/^GUARDIAN_[A-Z0-9_]{1,100}$/;
 const COUNTS=Object.freeze(['receipts','quarantined','duplicates',
   'rejected','handoffs','returns']);
 const CORRELATED=Object.freeze([
@@ -75,20 +84,60 @@ function exact(raw,keys) {
 function hash(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
+function snapshotClaim(raw) {
+  // One descriptor snapshot only. Trying two successive exact() snapshots
+  // would allow a stateful Proxy to change its visible shape between them.
+  try {
+    if (!raw || typeof raw!=='object' || Array.isArray(raw)) return null;
+    const proto=Object.getPrototypeOf(raw);
+    if (proto!==Object.prototype && proto!==null) return null;
+    const desc=Object.getOwnPropertyDescriptors(raw);
+    const names=Reflect.ownKeys(desc);
+    const keys=names.length===CONTENT_CLAIM_KEYS.length+1?
+      CONTENT_CLAIM_KEYS:CLAIM_KEYS;
+    const expected=[...keys,'claimSha256'];
+    if (names.length!==expected.length ||
+        names.some(k=>typeof k!=='string' || !expected.includes(k))) {
+      return null;
+    }
+    const out={};
+    for (const key of expected) {
+      const d=desc[key];
+      if (!d || !Object.hasOwn(d,'value') || !d.enumerable) return null;
+      Object.defineProperty(out,key,{value:d.value,enumerable:true});
+    }
+    return Object.freeze(out);
+  } catch (_) {return null;}
+}
 function parseClaim(raw) {
-  const x=exact(raw,[...CLAIM_KEYS,'claimSha256']);
+  const x=snapshotClaim(raw);
+  const hasContentPin=!!x && Object.hasOwn(x,'terminalEventSha256');
   if (!x || x.schemaVersion!==2 ||
       x.kind!=='GUARDIAN_CASEWORK_GENERATION_CLAIM_V2' ||
       !UUID.test(x.caseworkReceiptId??'') ||
       !UUID.test(x.terminalEventId??'') ||
       !GENERATION.test(x.generationId??'') ||
+      (hasContentPin && !SHA.test(x.terminalEventSha256??'')) ||
       ['bundleSha256','caseworkJournalSha256','terminalJournalSha256',
         'launchLedgerSha256','claimSha256'].some(k=>!SHA.test(x[k]??''))) {
     return null;
   }
   const pinned={};
-  for (const key of CLAIM_KEYS) pinned[key]=x[key];
+  for (const key of hasContentPin?CONTENT_CLAIM_KEYS:CLAIM_KEYS) {
+    pinned[key]=x[key];
+  }
   return hash(pinned)===x.claimSha256?x:null;
+}
+function selectedEventHash(event) {
+  if (!event || typeof event.timestamp!=='string' ||
+      !TIMESTAMP.test(event.timestamp) ||
+      !Number.isFinite(Date.parse(event.timestamp)) ||
+      !(event.errorCode===null ||
+        (typeof event.errorCode==='string' &&
+         ERROR_CODE.test(event.errorCode)))) return null;
+  const canonical={};
+  for (const field of EVENT) canonical[field]=event[field];
+  return hash(canonical);
 }
 function hold(x) {
   return x && x.status==='SOURCE_ONLY_HOLD' &&
@@ -176,10 +225,12 @@ function evidenceSnapshot(packet, rawComparison) {
         packet.selectedFailure?.state!=='FAILED' ||
         packet.selectedFailure?.generationId!==packet.generationId ||
         packet.journalSha256!==comparison.journalSha256) return null;
+    const eventContentSha256=selectedEventHash(packet.selectedFailure);
+    if (!eventContentSha256) return null;
     return Object.freeze({
       event:packet.selectedFailure.eventId,generation:packet.generationId,
       journal:packet.journalSha256,ledger:packet.launchLedgerSha256,
-      packet:packet.evidenceSha256,
+      packet:packet.evidenceSha256,eventContentSha256,
       failureCount:packet.failureCount,
     });
   } catch (_) {return null;}
@@ -242,7 +293,9 @@ function createGuardianCaseworkGenerationPinAssessment(options) {
         c.event!==claim.terminalEventId ||
         c.generation!==claim.generationId ||
         c.journal!==claim.terminalJournalSha256 ||
-        c.ledger!==claim.launchLedgerSha256) {
+        c.ledger!==claim.launchLedgerSha256 ||
+        (Object.hasOwn(claim,'terminalEventSha256') &&
+         c.eventContentSha256!==claim.terminalEventSha256)) {
       return fail('GUARDIAN_CASEWORK_GENERATION_PIN_MISMATCH');
     }
     return Object.freeze({
@@ -256,6 +309,10 @@ function createGuardianCaseworkGenerationPinAssessment(options) {
       caseworkJournalSha256:a.casework,
       terminalJournalSha256:a.terminal,
       launchLedgerSha256:c.ledger,
+      ...(Object.hasOwn(claim,'terminalEventSha256') ? {
+        terminalEventSha256:c.eventContentSha256,
+        eventContentBinding:'LOCAL_UNAUTHENTICATED_CONTENT_MATCH_ONLY',
+      } : {}),
       crossJournalBinding:'LOCAL_UNAUTHENTICATED_PIN_MATCH_ONLY',
       generationLedgerBinding:'LOCAL_V2_FAULT_AND_LEDGER_MATCH_ONLY',
       custodyVerified:false,liveness:'NOT_PROVEN',

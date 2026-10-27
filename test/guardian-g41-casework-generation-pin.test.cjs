@@ -31,6 +31,27 @@ function claimed(fields) {
     kind:'GUARDIAN_CASEWORK_GENERATION_CLAIM_V2',...pins};
   return Object.freeze({...claim,claimSha256:hash(JSON.stringify(claim))});
 }
+// G42: hash the verifier's *selectedFailure* content in its fixed V2
+// event-field order; not the outer packet, receipt, or claimant field order.
+function eventContentDigest(event) {
+  return hash(JSON.stringify({
+    eventId:event.eventId,timestamp:event.timestamp,state:event.state,
+    errorCode:event.errorCode,generationId:event.generationId,
+  }));
+}
+function contentClaim(base,terminalEventSha256) {
+  const pinned={
+    schemaVersion:2,kind:'GUARDIAN_CASEWORK_GENERATION_CLAIM_V2',
+    caseworkReceiptId:base.caseworkReceiptId,
+    bundleSha256:base.bundleSha256,
+    caseworkJournalSha256:base.caseworkJournalSha256,
+    terminalEventId:base.terminalEventId,terminalEventSha256,
+    generationId:base.generationId,
+    terminalJournalSha256:base.terminalJournalSha256,
+    launchLedgerSha256:base.launchLedgerSha256,
+  };
+  return Object.freeze({...pinned,claimSha256:hash(JSON.stringify(pinned))});
+}
 function hold(out,verified) {
   assert.equal(out.schemaVersion,2);
   assert.equal(out.kind,'GUARDIAN_CASEWORK_GENERATION_PIN_ASSESSMENT_V2');
@@ -110,7 +131,7 @@ async function fixture(fn) {
   });
   try {
     await fn({root,source,cases,terminalPath,casePath,ledgerPath,
-      journal,session,casework,inspector,intake,claim,raw});
+      journal,session,casework,inspector,intake,claim,terminal,raw});
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 }
 
@@ -220,5 +241,70 @@ test('G41 stale Generation ledger and terminal evidence never match',async()=>{
     // No hidden mutation of the Casework journal from failed correlation.
     assert.equal(f.inspector().inspect().journalSha256,
       f.claim.caseworkJournalSha256);
+  });
+});
+
+test('G42 extended V2 manifest pins exact terminal event content without changing legacy G41',async()=>{
+  await fixture(async f=>{
+    const before=[fs.readFileSync(f.terminalPath),
+      fs.readFileSync(f.casePath),fs.readFileSync(f.ledgerPath)];
+    const digest=eventContentDigest(f.terminal);
+    const claim=contentClaim(f.claim,digest);
+    const output=f.session.operator.assessCaseworkGenerationPin(claim);
+    hold(output,true);
+    assert.equal(output.claimSha256,claim.claimSha256);
+    assert.equal(output.terminalEventSha256,digest);
+    assert.equal(output.eventContentBinding,
+      'LOCAL_UNAUTHENTICATED_CONTENT_MATCH_ONLY');
+    assert.equal(output.crossJournalBinding,
+      'LOCAL_UNAUTHENTICATED_PIN_MATCH_ONLY');
+    // Existing G41 manifests remain wire-compatible and never acquire
+    // a content-binding label they did not request/verify.
+    const legacy=f.session.operator.assessCaseworkGenerationPin(f.claim);
+    hold(legacy,true);
+    assert.equal(Object.hasOwn(legacy,'terminalEventSha256'),false);
+    assert.equal(Object.hasOwn(legacy,'eventContentBinding'),false);
+    assert.deepEqual([fs.readFileSync(f.terminalPath),
+      fs.readFileSync(f.casePath),fs.readFileSync(f.ledgerPath)],before);
+  });
+});
+
+test('G42 rejects recomputed claim hashes pinning wrong fault timestamp or error code',async()=>{
+  await fixture(async f=>{
+    const expected=eventContentDigest(f.terminal);
+    const wrong=[
+      '0'.repeat(64),
+      eventContentDigest({...f.terminal,
+        timestamp:'2020-01-01T00:00:00.000Z'}),
+      eventContentDigest({...f.terminal,
+        errorCode:'GUARDIAN_UNRELATED_FAILURE'}),
+    ];
+    for(const digest of wrong) {
+      assert.notEqual(digest,expected);
+      const claim=contentClaim(f.claim,digest);
+      // The claim checksum is valid; only its event-content pin is wrong.
+      assert.equal(claim.claimSha256,
+        hash(JSON.stringify(Object.fromEntries(Object.entries(claim)
+          .filter(([key])=>key!=='claimSha256')))));
+      hold(f.session.operator.assessCaseworkGenerationPin(claim),false);
+    }
+    const valid=contentClaim(f.claim,expected);
+    for (const invalid of [
+      {...valid,terminalEventSha256:'not-sha256'},
+      {...valid,terminalEventSha256:null},
+      {...valid,secret:'NEVER_ECHO_THIS'},
+      {...valid,claimSha256:'f'.repeat(64)},
+    ]) {
+      const out=f.session.operator.assessCaseworkGenerationPin(invalid);
+      hold(out,false);
+      assert.equal(JSON.stringify(out).includes('NEVER_ECHO_THIS'),false);
+    }
+    const accessor={...valid};
+    Object.defineProperty(accessor,'terminalEventSha256',{
+      enumerable:true,get(){throw Error('NEVER_ECHO_THIS');},
+    });
+    const out=f.session.operator.assessCaseworkGenerationPin(accessor);
+    hold(out,false);
+    assert.equal(JSON.stringify(out).includes('NEVER_ECHO_THIS'),false);
   });
 });
