@@ -152,3 +152,37 @@ nested JSON, duplicate members, partial history, P0 source, JSON over-limit,
 malicious objects, unsafe file modes, symlinks, directory permissions,
 journal capacity and repeated submissions, all without modifying existing
 Host/IPC/process-generation or Check-writing code.
+
+## G27E — durable local batch dedup, exception query and handoff notes
+
+A separate guardian-local-offline-casework.cjs module adds three bounded
+explicit operations, without changing the G27D intake API, process
+generation, IPC or Check-writing code.
+
+- intakeMany([JSON_TEXT,...]) takes 1–8 offline G27B bundles and checks
+  checksum and G27C structural history. Within one batch or later local
+  process, a previously quarantined bundle SHA-256 becomes DUPLICATE
+  referencing the first quarantine receipt ID. Invalid input remains
+  REJECTED. No evidence is promoted to trusted custody.
+- exceptions({limit?,cursor?}) queries redacted REJECTED, DUPLICATE
+  and RETURNED annotations newest-first, 1–20 per page. The offset cursor
+  binds to the complete journal digest and becomes stale after any change.
+  No raw bundles, keys, actor identities or PIDs are exported.
+- handoff({receiptId,transition}) annotates only previously QUARANTINED
+  records. REQUESTED -> ACKNOWLEDGED/RETURNED -> (if returned) REQUESTED.
+  Unknown, rejected, duplicate or out-of-order subjects are rejected.
+  Local annotations are NOT authenticated human review or authorization.
+
+Explicit writers use owner-only directories, 0600 files, single-write batch
+append plus fsync, and an O_EXCL per-journal lock. A competing or stale lock
+fails closed, never auto-recovers; an uncertain write retains its lock for
+manual owner intervention. Reads verify complete UTF-8 JSON lines, exact
+record shapes, monotonic event referents and transition history; failures
+return NOT_VERIFIED / HOLD rather than a partial answer. Query methods
+never take the write lock or perform a mutation.
+
+This is local deduplication, NOT globally distributed exactly-once or a
+tamperproof audit chain. Same-UID compromise and filesystem attacks are
+outside the local-source proof. Every output remains SOURCE_ONLY_HOLD,
+custodyVerified=false, liveness=NOT_PROVEN, activationAllowed=false,
+automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED.
