@@ -3,6 +3,8 @@
  *
  * No filesystem write at import or construction. Terminal callback is
  * synchronous so storage failure makes the parent Controller fail closed.
+ * Directory/file identity is rechecked before append and after fsync;
+ * partial-tail or replaced journals fail closed without repair.
  * Only allowlisted primitives are recorded; never serialized Host objects,
  * tokens, keys, D1 records, arbitrary exception messages or provider blobs.
  */
@@ -37,19 +39,55 @@ function createGuardianLocalReceiptJournal(options) {
       maxBytes > 10_485_760) {
     throw code('GUARDIAN_JOURNAL_CONFIG_INVALID');
   }
-  let directory;
+  const configuredDirectory = options.directory;
+  let directory, directoryAnchor;
   try {
-    directory = fs.realpathSync(options.directory);
-    const stat = fs.statSync(directory);
-    if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 ||
-        (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+    directory = fs.realpathSync(configuredDirectory);
+    directoryAnchor = fs.lstatSync(directory);
+    if (!directoryAnchor.isDirectory() || directoryAnchor.isSymbolicLink() ||
+        (directoryAnchor.mode & 0o077) !== 0 ||
+        (typeof process.getuid === 'function' &&
+         directoryAnchor.uid !== process.getuid())) {
       throw new Error('unsafe evidence directory');
     }
   } catch (_) { throw code('GUARDIAN_JOURNAL_DIRECTORY_UNVERIFIED'); }
 
   const target = path.join(directory, options.fileName);
-  const flags = fs.constants.O_WRONLY | fs.constants.O_APPEND |
-    fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
+  const flags = fs.constants.O_RDWR | fs.constants.O_APPEND |
+    fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0) |
+    (fs.constants.O_NONBLOCK ?? 0);
+  // In-memory identity guard; not a signed or persistent chain of custody.
+  // Once this instance has appended, it may never silently start a new file.
+  let committedIdentity = null;
+  function sameIdentity(a, b) {
+    return a.dev === b.dev && a.ino === b.ino;
+  }
+  function trustedDirectory() {
+    try {
+      const st = fs.lstatSync(directory);
+      return st.isDirectory() && !st.isSymbolicLink() &&
+        sameIdentity(st, directoryAnchor) && (st.mode & 0o077) === 0 &&
+        (typeof process.getuid !== 'function' ||
+         st.uid === process.getuid()) &&
+        fs.realpathSync(configuredDirectory) === directory;
+    } catch (_) { return false; }
+  }
+  function trustedFile(fd) {
+    if (!trustedDirectory()) throw code('GUARDIAN_JOURNAL_DIRECTORY_UNVERIFIED');
+    const st = fs.fstatSync(fd);
+    const visible = fs.lstatSync(target);
+    if (!st.isFile() || !visible.isFile() || visible.isSymbolicLink() ||
+        st.nlink !== 1 || visible.nlink !== 1 ||
+        !sameIdentity(st, visible) ||
+        (st.mode & 0o077) !== 0 || (visible.mode & 0o077) !== 0 ||
+        (typeof process.getuid === 'function' &&
+          (st.uid !== process.getuid() || visible.uid !== process.getuid())) ||
+        (committedIdentity !== null &&
+         !sameIdentity(st, committedIdentity))) {
+      throw code('GUARDIAN_JOURNAL_FILE_UNVERIFIED');
+    }
+    return st;
+  }
   function append(receipt) {
     const keys = ['state', 'errorCode', 'hostStopped',
       'activationAllowed', 'releaseAuthority', 'automaticRestartAllowed'];
@@ -80,17 +118,47 @@ function createGuardianLocalReceiptJournal(options) {
 
     let fd;
     try {
+      if (!trustedDirectory()) {
+        throw code('GUARDIAN_JOURNAL_DIRECTORY_UNVERIFIED');
+      }
+      // Do not recreate a file once this instance has recorded evidence.
+      // In particular, deleting an existing journal must not reset history.
+      if (committedIdentity !== null) {
+        const existing = fs.lstatSync(target);
+        if (!existing.isFile() || existing.isSymbolicLink() ||
+            !sameIdentity(existing, committedIdentity)) {
+          throw code('GUARDIAN_JOURNAL_FILE_UNVERIFIED');
+        }
+      }
       fd = fs.openSync(target, flags, 0o600);
-      const stat = fs.fstatSync(fd);
-      if (!stat.isFile() || stat.size > maxBytes - data.length ||
-          (stat.mode & 0o077) !== 0 ||
-          (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      const stat = trustedFile(fd);
+      if (stat.size > maxBytes - data.length) {
         throw code('GUARDIAN_JOURNAL_FILE_UNVERIFIED');
       }
+      // Preserve a partial final record after an uncertain previous write.
+      // Never silently concatenate a new valid receipt onto truncated JSONL.
+      if (stat.size > 0) {
+        const tail = Buffer.alloc(1);
+        if (fs.readSync(fd, tail, 0, 1, stat.size - 1) !== 1 ||
+            tail[0] !== 10) {
+          throw code('GUARDIAN_JOURNAL_FILE_UNVERIFIED');
+        }
+      }
+      // Recheck the pathname immediately before append; identity checks
+      // remain best-effort and are not a transactional filesystem lock.
+      trustedFile(fd);
       if (fs.writeSync(fd, data, 0, data.length) !== data.length) {
         throw code('GUARDIAN_JOURNAL_WRITE_UNVERIFIED');
       }
       fs.fsyncSync(fd);
+      const after = trustedFile(fd);
+      if (after.size !== stat.size + data.length ||
+          !sameIdentity(after, stat)) {
+        throw code('GUARDIAN_JOURNAL_WRITE_UNVERIFIED');
+      }
+      committedIdentity = Object.freeze({
+        dev: after.dev, ino: after.ino,
+      });
     } catch (_) {
       throw code('GUARDIAN_JOURNAL_WRITE_FAILED');
     } finally {
