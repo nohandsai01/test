@@ -201,7 +201,7 @@ function openJournal(file,max) {
     const stats=summarise(rows);
     if (!stats) return {state:'JOURNAL_INVALID',stats:null,digest:null};
     return {state:'JOURNAL_STRUCTURALLY_CONSISTENT',
-      stats,stamp:metadata(begin),
+      stats,rows:Object.freeze(rows),stamp:metadata(begin),
       digest:crypto.createHash('sha256').update(contents).digest('hex')};
   } catch (e) {
     return e?.code === 'ENOENT' ?
@@ -302,6 +302,70 @@ function createGuardianCaseworkDiagnostics(options) {
     }
     return observation(journalState,lockAfter);
   }
-  return Object.freeze({inspect});
+  // G41: only a nominated, previously quarantined receipt may be observed.
+  // This does not resolve a bundle, authorize the claimed association with a
+  // Generation, or grant custody. Double-check locks, journal bytes and inode.
+  function inspectQuarantinedReceipt(input) {
+    const request=exact(input,['receiptId','journalSha256']);
+    const unavailable=(reason)=>Object.freeze({
+      schemaVersion:2,kind:'GUARDIAN_CASEWORK_RECEIPT_OBSERVATION_V2',
+      status:'SOURCE_ONLY_HOLD',
+      authority:'LOCAL_UNAUTHENTICATED_OBSERVATION',
+      result:'NOT_VERIFIED',reason,caseworkReceiptId:null,
+      bundleSha256:null,journalSha256:null,
+      custodyVerified:false,liveness:'NOT_PROVEN',
+      manualInterventionRequired:true,automaticRestartAllowed:false,
+      activationAllowed:false,releaseAuthority:'NOT_ISSUED',
+    });
+    if (!request || !isUUID(request.receiptId) ||
+        !isSha(request.journalSha256)) {
+      return unavailable('GUARDIAN_CASEWORK_PIN_INVALID');
+    }
+    try {
+      if (!trustedDirectory()) {
+        return unavailable('GUARDIAN_CASEWORK_PIN_SOURCE_UNVERIFIED');
+      }
+      const l0=lockSnapshot(lock);
+      const a=openJournal(journal,max);
+      const b=openJournal(journal,max);
+      const l1=lockSnapshot(lock);
+      if (!trustedDirectory() ||
+          l0.state!=='LOCK_ABSENT_OBSERVED' ||
+          l1.state!=='LOCK_ABSENT_OBSERVED' ||
+          a.state!=='JOURNAL_STRUCTURALLY_CONSISTENT' ||
+          b.state!=='JOURNAL_STRUCTURALLY_CONSISTENT' ||
+          a.digest!==request.journalSha256 ||
+          b.digest!==a.digest || !sameMeta(a.stamp,b.stamp)) {
+        return unavailable('GUARDIAN_CASEWORK_PIN_SOURCE_UNVERIFIED');
+      }
+      const candidate=a.rows.find(row=>row.id===request.receiptId);
+      const again=b.rows.find(row=>row.id===request.receiptId);
+      if (!candidate || !again ||
+          candidate.type!=='INTAKE' ||
+          candidate.decision!=='QUARANTINED' ||
+          candidate.reason!=='GUARDIAN_CASEWORK_QUARANTINED' ||
+          !isSha(candidate.bundleSha256) ||
+          candidate.bundleSha256!==again.bundleSha256 ||
+          again.decision!=='QUARANTINED') {
+        return unavailable('GUARDIAN_CASEWORK_PIN_NOT_QUARANTINED');
+      }
+      return Object.freeze({
+        schemaVersion:2,kind:'GUARDIAN_CASEWORK_RECEIPT_OBSERVATION_V2',
+        status:'SOURCE_ONLY_HOLD',
+        authority:'LOCAL_UNAUTHENTICATED_OBSERVATION',
+        result:'LOCAL_QUARANTINE_OBSERVED_ONLY',
+        reason:'GUARDIAN_CASEWORK_PIN_LOCAL_RECORD_MATCH',
+        caseworkReceiptId:candidate.id,
+        bundleSha256:candidate.bundleSha256,
+        journalSha256:a.digest,
+        custodyVerified:false,liveness:'NOT_PROVEN',
+        manualInterventionRequired:true,automaticRestartAllowed:false,
+        activationAllowed:false,releaseAuthority:'NOT_ISSUED',
+      });
+    } catch (_) {
+      return unavailable('GUARDIAN_CASEWORK_PIN_READ_FAILED');
+    }
+  }
+  return Object.freeze({inspect,inspectQuarantinedReceipt});
 }
 module.exports={createGuardianCaseworkDiagnostics};
