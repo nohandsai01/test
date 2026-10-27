@@ -24,6 +24,8 @@ const { createGuardianLocalTerminalPersistence } =
   require('./guardian-local-terminal-persistence.cjs');
 const { createGuardianLocalJournalBudget } =
   require('./guardian-local-journal-budget.cjs');
+const { createGuardianLocalStoragePressure } =
+  require('./guardian-local-storage-pressure.cjs');
 
 const FIELDS = new Set(['cwd', 'entrypoint', 'directory', 'fileName',
   'startupTimeoutMs', 'shutdownTimeoutMs', 'healthProbeTimeoutMs',
@@ -84,6 +86,9 @@ function createGuardianLocalOperatorSession(options) {
     ...(options.maxJournalBytes === undefined ? {} :
       { maxBytes: options.maxJournalBytes }),
   });
+  const storagePressure = createGuardianLocalStoragePressure({
+    controller, directory: options.directory, journalBudget,
+  });
 
   // These two capabilities MUST NOT be composed into a single Operator
   // object. An Operator read cannot call start(), stop(), reset() or touch D1.
@@ -104,6 +109,7 @@ function createGuardianLocalOperatorSession(options) {
     assessRuntime: () => runtimeAssessment.assess(),
     diagnoseTerminalPersistence: () => terminalPersistence.diagnose(),
     assessJournalBudget: () => journalBudget.assess(),
+    assessJournalStorage: () => storagePressure.assess(),
   });
   return Object.freeze({ owner, operator });
 }

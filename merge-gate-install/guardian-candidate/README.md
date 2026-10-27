@@ -1316,3 +1316,24 @@ The diagnosis accepts both the original v1 Controller/triage fields and the
 optional generation ID, unterminated and concurrent counters staged in the
 separate G27–G30 branches. Their transitions also invalidate a stale read;
 the PR remains independently based on PR #15 and does not modify those Writers.
+
+
+## G33A — Operator local filesystem pressure triage (source only)
+
+The read-only assessJournalStorage() Operator method composes the existing
+protected assessJournalBudget() journal-file identity/limit checks with two
+bounded statfs observations of the owner-scoped local directory. Three
+Controller snapshots bracket the reads; generation/state/PID drift, journal
+identity/size changes, malformed or missing filesystem statistics, unsafe
+permissions, symlinked directory, or changing filesystem type fail P0.
+
+The smaller available-block sample determines local pressure: below 1 MiB is
+P1, below 8 MiB is P2, otherwise P3 only if the journal-file limit also has
+P3 headroom. A journal-file P1/P2 risk retains its priority even on a filesystem
+with ample free blocks. Returned free-capacity telemetry is saturated at 64 MiB
+for privacy; it is not an exact disk-space quantity, guaranteed reservation,
+permission to append, successful fsync, liveness proof or evidence attestation.
+The read never probes or starts/stops children, writes files, touches production
+D1, releases HOLD or emits a Check. An attacker with control of the local
+filesystem or a mount change/ABA between sampling instants can defeat this
+best-effort observation; all results retain SOURCE_ONLY_HOLD and human review.
