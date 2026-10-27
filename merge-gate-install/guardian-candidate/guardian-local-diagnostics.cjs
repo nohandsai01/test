@@ -272,7 +272,8 @@ function evidenceEnvelope(observation, reason, details = null) {
     try {
       fd = fs.openSync(target, flags);
       const st0 = fs.fstatSync(fd);
-      if (!st0.isFile() || (st0.mode & 0o077) !== 0 ||
+      if (!st0.isFile() || st0.nlink !== 1 ||
+          (st0.mode & 0o077) !== 0 ||
           (typeof process.getuid === 'function' && st0.uid !== process.getuid()) ||
           st0.size < 1 || st0.size > maxBytes) {
         return { reason: 'FILE' };
@@ -292,11 +293,14 @@ function evidenceEnvelope(observation, reason, details = null) {
           st1.size !== st0.size || st1.mtimeMs !== st0.mtimeMs ||
           st1.ctimeMs !== st0.ctimeMs ||
           currentPath.dev !== st0.dev || currentPath.ino !== st0.ino ||
-          currentPath.isSymbolicLink() ||
+          currentPath.isSymbolicLink() || currentPath.nlink !== 1 ||
           (currentPath.mode & 0o077) !== 0) {
         return { reason: 'CHANGED' };
       }
-      return { buffer };
+      return { buffer, identity: Object.freeze({
+        dev: st0.dev, ino: st0.ino, size: st0.size,
+        mtimeMs: st0.mtimeMs, ctimeMs: st0.ctimeMs,
+      }) };
     } catch (error) {
       return { reason: error?.code === 'ENOENT' ? 'MISSING' : 'READ' };
     } finally {
@@ -304,6 +308,19 @@ function evidenceEnvelope(observation, reason, details = null) {
         try { fs.closeSync(fd); } catch (_) {}
       }
     }
+  }
+  // A pair of independently protected snapshots is accepted only when
+  // both records were byte-identical on two bracketing reads. Missing on
+  // both is represented explicitly; missing -> present is never a baseline.
+  function sameFileRead(a, b) {
+    if (a.buffer && b.buffer) return a.buffer.equals(b.buffer) &&
+      a.identity.dev === b.identity.dev &&
+      a.identity.ino === b.identity.ino &&
+      a.identity.size === b.identity.size &&
+      a.identity.mtimeMs === b.identity.mtimeMs &&
+      a.identity.ctimeMs === b.identity.ctimeMs;
+    return !a.buffer && !b.buffer && a.reason === 'MISSING' &&
+      b.reason === 'MISSING';
   }
   function parseLines(buffer, validate) {
     if (!buffer || !buffer.length || buffer[buffer.length - 1] !== 10 ||
@@ -411,6 +428,16 @@ function evidenceEnvelope(observation, reason, details = null) {
         before, null, 0, null);
     }
 
+    // G31: independent second reads close the journal/ledger gap. The
+    // comparison intentionally does NOT retry or silently reconcile a
+    // different version: this is an observation, never a transaction.
+    const journalConfirm = readStable(file);
+    const ledgerConfirm = readStable(ledgerFile);
+    if (!sameFileRead(journalRead, journalConfirm) ||
+        !sameFileRead(ledgerRead, ledgerConfirm)) {
+      return observed('GUARDIAN_DIAGNOSTICS_PAIR_CHANGED_DURING_READ',
+        before, null, 0, null);
+    }
     if (!directoryTrusted()) {
       return observed('GUARDIAN_DIAGNOSTICS_DIRECTORY_UNVERIFIED',
         before, null, 0, null);

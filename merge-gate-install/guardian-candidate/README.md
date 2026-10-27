@@ -1462,3 +1462,32 @@ owner-reconciliation HOLD. Deleting both journal and ledger still
 requires a separately trusted external baseline; compromising same-UID
 source bytes is outside the local model. No Merge, Deploy, real D1,
 Check, keys or production mutation is part of this batch.
+
+
+## G31 — paired local launch ledger / terminal journal read consistency
+
+Source-only G31 hardens the existing V2 generation-bound evidence reader.
+The independent local Diagnostics now reads Journal A, Ledger B,
+Journal A-prime and Ledger B-prime. Both reads of each file must
+agree byte-for-byte on content, inode/device, size and modification
+metadata. A source becoming present or missing during observation,
+changing in place, gaining a new receipt, or being replaced by a new
+inode with byte-identical content returns a fixed P0/HOLD diagnostic.
+There is no automatic retry, repair, release, lock deletion or write.
+
+The separate Incident Evidence Verifier independently reopens Journal
+and Ledger after the initial checks. A V2 packet remains only a local
+checksum match if both journal snapshots agree and both protected
+ledger snapshots agree on digest, inode/device and metadata. Stale
+packets or conflicting generations remain NOT_VERIFIED, with no
+claimed custody or process liveness.
+
+The bounded full-suite and negative tests exercise actual owner-only
+temporary JSONL files and controlled journal/ledger changes during
+each read phase, including equal-byte inode substitution and legacy
+missing-store behavior. This is not an atomic multi-file filesystem
+transaction: changes that are fully reverted between reads (ABA),
+privileged same-UID tampering, deletion of BOTH journals before a
+new observer starts and absence of a trusted external anchor remain
+outside the proof. V1/V2 compatibility and fail-closed HOLD remain.
+No live D1/App/Check/credential/Deploy or Merge is authorized.
