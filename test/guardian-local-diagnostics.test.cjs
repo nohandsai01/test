@@ -63,11 +63,11 @@ function hold(report) {
   assert.ok(Object.isFrozen(report));
 }
 function file(directory) { return path.join(directory, 'guardian-test.jsonl'); }
-async function realChild(entrypoint, directory, callback) {
+async function realChild(entrypoint, directory, callback, onLaunch) {
   const ctrl = createGuardianLocalProcessController({
     cwd: path.dirname(entrypoint), entrypoint,
     startupTimeoutMs: 4000, shutdownTimeoutMs: 600,
-    onTerminal: callback,
+    onTerminal: callback, onLaunch,
   });
   const start = await ctrl.start();
   assert.equal(start.state, 'RUNNING');
@@ -293,7 +293,8 @@ test('journal size exceeds protected quota and cannot be interpreted as clean', 
 test('real Protected Host child terminal is observable after process exit without changing D1', async () => {
   await temp(async (directory) => {
     const store = journal(directory);
-    const child = await realChild(workerScript, directory, store.append);
+    const child = await realChild(workerScript, directory, store.append,
+      store.recordLaunch);
     assert.equal((await child.stop()).state, 'STOPPED');
     const result = inspect(directory, child);
     hold(result);
@@ -313,6 +314,7 @@ test('abnormal owned child exit is visible in persisted diagnostics after restar
     const store = journal(directory);
     const child = createGuardianLocalProcessController({
       cwd: directory, entrypoint: copied, onTerminal: store.append,
+      onLaunch: store.recordLaunch,
     });
     await assert.rejects(child.start(),
       { code: 'GUARDIAN_CHILD_EXIT_BEFORE_READY' });
