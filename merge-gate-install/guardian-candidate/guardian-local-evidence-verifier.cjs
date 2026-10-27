@@ -385,7 +385,11 @@ function createGuardianLocalEvidenceVerifier(options) {
         terminated.add(row.generationId);
       }
       return launched.has(packet.generationId) &&
-        trustedDirectory();
+        trustedDirectory() ? Object.freeze({
+          dev: initial.dev, ino: initial.ino,
+          size: initial.size, mtimeMs: initial.mtimeMs,
+          ctimeMs: initial.ctimeMs,
+        }) : false;
     } catch (_) { return false; }
     finally {
       if (fd !== undefined) {
@@ -404,8 +408,26 @@ function createGuardianLocalEvidenceVerifier(options) {
     if (!matchingIncident(received, snapshot.rows)) {
       return outcome('GUARDIAN_EVIDENCE_PACKET_CONTENT_MISMATCH');
     }
-    if (!verifyLedger(received, snapshot.rows)) {
+    const firstLedger = verifyLedger(received, snapshot.rows);
+    if (!firstLedger) {
       return outcome('GUARDIAN_EVIDENCE_GENERATION_LEDGER_UNVERIFIED');
+    }
+    if (received.schemaVersion === 2) {
+      // G31: journal A -> ledger B -> journal A' -> ledger B'.
+      // Any observable append/rewrite/replacement between paired reads
+      // invalidates this packet rather than mixing two source versions.
+      const journalAgain = readLocalSnapshot();
+      const secondLedger = journalAgain ?
+        verifyLedger(received, journalAgain.rows) : false;
+      if (!journalAgain ||
+          journalAgain.digest !== snapshot.digest ||
+          journalAgain.fileIdentity.dev !== snapshot.fileIdentity.dev ||
+          journalAgain.fileIdentity.ino !== snapshot.fileIdentity.ino ||
+          !secondLedger ||
+          Object.keys(firstLedger).some((key) =>
+            firstLedger[key] !== secondLedger[key])) {
+        return outcome('GUARDIAN_EVIDENCE_PAIR_CHANGED_DURING_READ');
+      }
     }
     return outcome('GUARDIAN_EVIDENCE_LOCAL_SNAPSHOT_MATCH',
       snapshot.rows.length, snapshot.digest);
