@@ -390,6 +390,10 @@ function evidenceEnvelope(observation, reason, details = null) {
     } else if (ledgerRead.reason !== 'MISSING') {
       return observed('GUARDIAN_DIAGNOSTICS_GENERATION_LEDGER_UNVERIFIED',
         before, null, 0, null);
+    } else if (!buffer) {
+      // Neither store exists: identical to the pre-G27 single-read result.
+      return observed('GUARDIAN_DIAGNOSTICS_JOURNAL_MISSING',
+        before, null, 0, null);
     }
 
     if (!directoryTrusted()) {
