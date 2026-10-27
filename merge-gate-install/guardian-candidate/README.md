@@ -1263,3 +1263,34 @@ journal plus deterministic P0/P1/P2/P3, freshness, malformed fields, controller
 drift, no-side-effects and exception/non-leakage scenarios. Hosted D1,
 production process identity, GitHub App Check signer, independent QA and
 deployment acceptance remain outside this source-only development batch.
+
+
+## G26 — bracketed runtime/journal race consistency (source-only)
+
+G25's passive assessRuntime() now uses a bounded double-journal/triage
+read around a single health-observation read, plus three sanitized
+Controller snapshots (before, between and after). Both independently
+observed journal histories must agree on protected SHA-256, event count,
+fault count, classification, source reason, process state and owner action.
+Each Controller snapshot must agree on state, PID and error code. Any
+mismatch, mid-read journal append/replacement, missing baseline transition,
+hostile getter or thrown reader causes P0 LOCAL_OBSERVATION_UNVERIFIED,
+manual owner investigation and SOURCE_ONLY_HOLD. G26 never retries or
+corrects evidence, never probes/starts/stops a child and never clears HOLD.
+
+A RECENT health sample is also checked against elapsed monotonic time spent
+across both journal reads: if it has aged beyond its own pinned max-age by
+the end of the bracket, the result becomes P0 instead of retaining RECENT.
+There is no new Check authority, no raw journal payload or PID in results.
+
+These checks detect observable races, not a linearizable multi-source OS
+transaction: extremely brief process/journal changes that return to
+byte-identical values between observation points (ABA), or compromise of
+all local evidence, remain outside their proof. The status always returns
+liveness=NOT_PROVEN, activationAllowed=false,
+releaseAuthority=NOT_ISSUED and automaticRestartAllowed=false.
+Negative tests deliberately mutate journal metadata during the health
+read, append a real protected receipt, vary the mid-snapshot PID, poison
+the second read with exceptions/getters, and expire a RECENT observation
+while the second read is delayed. No reviewer or production activation
+is performed mid-batch.

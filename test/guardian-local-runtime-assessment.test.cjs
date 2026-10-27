@@ -115,8 +115,8 @@ test('inert construction and passive assessment never start, probe or mutate', (
   assert.ok(Object.isFrozen(assessment));
   const result = assessment.assess();
   assertHold(result);
-  assert.equal(track.status, 2);
-  assert.equal(track.triage, 1);
+  assert.equal(track.status, 3);
+  assert.equal(track.triage, 2);
   assert.equal(track.health, 1);
   assert.equal(track.probe, 0);
   assert.equal(result.priority, 'P2');
@@ -342,4 +342,190 @@ test('real protected child lifecycle keeps Operator-only assessment passive and 
     assert.equal(stopped.manualInterventionRequired, false);
     assert.equal(fs.readdirSync(directory).length, 1);
   });
+});
+
+
+test('G26 stable source performs two independent triage reads and three status snapshots', () => {
+  let sequence = 0;
+  const { assessment, track } = harness(
+    () => controllerStatus('RUNNING', 1234),
+    () => { sequence++; return triage(); },
+    () => health());
+  const result = assessment.assess();
+  assertHold(result);
+  assert.equal(result.priority, 'P2');
+  assert.equal(result.classification, 'RECENT_LOCAL_PROBE_ONLY');
+  assert.equal(sequence, 2);
+  assert.deepEqual(track, { status: 3, triage: 2, health: 1, probe: 0 });
+});
+
+test('G26 append or rewritten journal between health read and second triage is P0', () => {
+  for (const changed of [
+    { journalSha256: 'a'.repeat(64) },
+    { journalEntries: 3 },
+    { failureCount: 1, priority: 'P1',
+      classification: 'RECORDED_FAILURE',
+      nextAction: 'OWNER_REVIEW_FAULT_HISTORY' },
+    { sourceReason: 'GUARDIAN_DIAGNOSTICS_CLEAN_STOP' },
+    { nextAction: 'OWNER_REQUEST_FRESH_HEALTH_PROBE' },
+  ]) {
+    let reads = 0;
+    const { assessment } = harness(
+      () => controllerStatus(),
+      () => ++reads === 1 ? triage() : triage('P2', changed),
+      () => health());
+    const result = assessment.assess();
+    assertHold(result);
+    assert.equal(result.priority, 'P0');
+    assert.equal(result.classification, 'LOCAL_OBSERVATION_UNVERIFIED');
+    assert.equal(result.journalSha256, null);
+    assert.equal(result.healthFreshness, 'UNVERIFIED');
+    assert.equal(result.manualInterventionRequired, true);
+    assert.equal(reads, 2);
+  }
+});
+
+test('G26 previously missing journal appearing mid-assessment never counts as first start baseline', () => {
+  const baseline = triage('P2', {
+    classification: 'NO_LOCAL_BASELINE',
+    nextAction: 'OWNER_VERIFY_FIRST_START_PREREQUISITES',
+    sourceReason: 'GUARDIAN_DIAGNOSTICS_JOURNAL_MISSING',
+    journalEntries: 0, journalSha256: null, processState: 'CREATED',
+  });
+  const complete = triage('P2', {
+    processState: 'CREATED', journalEntries: 1, journalSha256: '1'.repeat(64),
+  });
+  let reads = 0;
+  const { assessment } = harness(
+    () => controllerStatus('CREATED', null),
+    () => ++reads === 1 ? baseline : complete,
+    () => health('UNVERIFIED', {
+      processState: 'CREATED',
+      reason: 'GUARDIAN_HEALTH_CHILD_NOT_RUNNING',
+    }));
+  const r = assessment.assess();
+  assertHold(r);
+  assert.equal(r.priority, 'P0');
+  assert.equal(r.manualInterventionRequired, true);
+});
+
+test('G26 transient intermediate PID change returning to original PID is caught', () => {
+  let observations = 0;
+  const { assessment, track } = harness(
+    () => controllerStatus('RUNNING', ++observations === 2 ? 9999 : 1234),
+    () => triage(), () => health());
+  const r = assessment.assess();
+  assertHold(r);
+  assert.equal(r.priority, 'P0');
+  assert.equal(track.triage, 1);
+  assert.equal(track.health, 0);
+  assert.equal(track.status, 2);
+});
+
+test('G26 controller changes only after health observation remains P0', () => {
+  let times = 0;
+  const { assessment } = harness(
+    () => controllerStatus('RUNNING', ++times < 3 ? 1234 : 9999),
+    () => triage(), () => health());
+  const result = assessment.assess();
+  assertHold(result);
+  assert.equal(result.priority, 'P0');
+});
+
+test('G26 second journal reader exception and hostile getter both fail closed', () => {
+  for (const poisoned of [
+    () => { throw new Error('PRIVATE_KEY_ABC123'); },
+    () => Object.defineProperty({}, 'schemaVersion', {
+      get() { throw new Error('SECRET_D1_CONNECTION'); },
+    }),
+  ]) {
+    let reads = 0;
+    const { assessment } = harness(
+      () => controllerStatus(),
+      () => ++reads === 1 ? triage() : poisoned(),
+      () => health());
+    const r = assessment.assess();
+    assertHold(r);
+    assert.equal(r.priority, 'P0');
+    assert.equal(r.journalSha256, null);
+    assert.ok(!JSON.stringify(r).includes('PRIVATE_KEY'));
+    assert.ok(!JSON.stringify(r).includes('SECRET_D1_CONNECTION'));
+  }
+});
+
+test('G26 slow journal second read cannot extend a RECENT health sample beyond max-age', () => {
+  let count = 0;
+  const { assessment } = harness(
+    () => controllerStatus(),
+    () => {
+      if (++count === 2) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 65);
+      }
+      return triage();
+    },
+    () => health('RECENT', { ageMs: 5, maxAgeMs: 50 }));
+  const r = assessment.assess();
+  assertHold(r);
+  assert.equal(count, 2);
+  assert.equal(r.priority, 'P0');
+  assert.equal(r.manualInterventionRequired, true);
+});
+
+test('G26 journal append during health sample is caught using actual protected SQLite-independent journal', async () => {
+  const { createGuardianLocalDiagnostics } = require(
+    '../merge-gate-install/guardian-candidate/guardian-local-diagnostics.cjs');
+  const { createGuardianLocalReceiptJournal } = require(
+    '../merge-gate-install/guardian-candidate/guardian-local-receipt-journal.cjs');
+  await tmp(async (directory) => {
+    const journal = createGuardianLocalReceiptJournal({
+      directory, fileName: 'guardian-g26.jsonl',
+    });
+    journal.append({ state: 'STOPPED', errorCode: null,
+      hostStopped: true, activationAllowed: false,
+      releaseAuthority: 'NOT_ISSUED', automaticRestartAllowed: false });
+    const ctrl = { status: () => controllerStatus('STOPPED', null) };
+    const diagnostics = createGuardianLocalDiagnostics({
+      controller: ctrl, directory, fileName: 'guardian-g26.jsonl',
+    });
+    let healthReads = 0;
+    const result = createGuardianLocalRuntimeAssessment({
+      controller: ctrl,
+      diagnostics,
+      healthObservation: { observe() {
+        healthReads++;
+        journal.append({ state: 'FAILED',
+          errorCode: 'GUARDIAN_CHILD_EXIT_UNVERIFIED',
+          hostStopped: false, activationAllowed: false,
+          releaseAuthority: 'NOT_ISSUED', automaticRestartAllowed: false });
+        return health('UNVERIFIED', {
+          processState: 'STOPPED',
+          reason: 'GUARDIAN_HEALTH_CHILD_NOT_RUNNING',
+        });
+      } },
+    }).assess();
+    assertHold(result);
+    assert.equal(healthReads, 1);
+    assert.equal(result.priority, 'P0');
+    assert.equal(result.journalSha256, null);
+    const lines = fs.readFileSync(path.join(directory, 'guardian-g26.jsonl'),
+      'utf8').trim().split('\n');
+    assert.equal(lines.length, 2);
+  });
+});
+
+test('G26 remains passive: no probe, no mutation, no Check or restart methods on result', () => {
+  let first = 0;
+  const { assessment, track } = harness(
+    () => controllerStatus(), () => {
+      first++;
+      return triage();
+    }, () => health());
+  const r = assessment.assess();
+  assertHold(r);
+  assert.equal(first, 2);
+  assert.equal(track.probe, 0);
+  assert.equal(Object.hasOwn(r, 'start'), false);
+  assert.equal(Object.hasOwn(r, 'stop'), false);
+  assert.equal(Object.hasOwn(r, 'Check'), false);
+  assert.equal(Object.hasOwn(r, 'resetHold'), false);
 });

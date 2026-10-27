@@ -93,6 +93,20 @@ function safeTriage(x) {
     return null;
   }
 }
+// A second independent journal read must describe the SAME protected
+// receipt history and classification as the first. Neither PID nor a
+// previously recent probe can establish continuous process liveness.
+function sameTriage(a, b) {
+  return !!a && !!b &&
+    a.priority === b.priority &&
+    a.classification === b.classification &&
+    a.nextAction === b.nextAction &&
+    a.sourceReason === b.sourceReason &&
+    a.processState === b.processState &&
+    a.journalEntries === b.journalEntries &&
+    a.journalSha256 === b.journalSha256 &&
+    a.failureCount === b.failureCount;
+}
 function safeHealth(x) {
   try {
     if (!record(x) || x.schemaVersion !== 1 ||
@@ -177,23 +191,44 @@ function createGuardianLocalRuntimeAssessment({ controller, diagnostics,
   }
 
   function assess() {
+    // G26: bracket the health sample between two independent protected
+    // journal reads, and bind both journal observations to the same
+    // controller state/PID/errorCode at three read boundaries.
+    // Not an atomic OS transaction: any observable inconsistency becomes
+    // P0 while all results preserve SOURCE_ONLY_HOLD.
     const before = safeState(controller);
     if (!before) return denied('OWNER_VERIFY_CONTROLLER_STATUS');
-    let rawTriage, rawHealth;
+    const startedAt = process.hrtime.bigint();
+    let first, triage, health, middle, after;
     try {
-      rawTriage = diagnostics.faultTriage();
-      rawHealth = healthObservation.observe();
+      first = safeTriage(diagnostics.faultTriage());
+      middle = safeState(controller);
+      if (!first || !sameState(before, middle) ||
+          first.processState !== before.state) {
+        return denied('OWNER_INVESTIGATE_LOCAL_OBSERVATIONS');
+      }
+      health = safeHealth(healthObservation.observe());
+      triage = safeTriage(diagnostics.faultTriage());
+      after = safeState(controller);
     } catch (_) {
       return denied('OWNER_INVESTIGATE_LOCAL_OBSERVATIONS');
     }
-    const after = safeState(controller);
-    const triage = safeTriage(rawTriage);
-    const health = safeHealth(rawHealth);
-    if (!sameState(before, after) || !triage || !health ||
+    if (!sameState(before, middle) || !sameState(before, after) ||
+        !sameTriage(first, triage) || !health ||
         triage.processState !== before.state ||
         health.processState !== before.state ||
         (before.state !== 'RUNNING' && health.freshness !== 'UNVERIFIED')) {
       return denied('OWNER_INVESTIGATE_LOCAL_OBSERVATIONS');
+    }
+    // Reading a second journal must not silently extend an earlier
+    // RECENT sample past its max-age window.
+    if (health.freshness === 'RECENT') {
+      const elapsedMs = Number((process.hrtime.bigint() - startedAt) /
+        1_000_000n);
+      if (!Number.isSafeInteger(elapsedMs) || elapsedMs < 0 ||
+          elapsedMs + health.ageMs > health.maxAgeMs) {
+        return denied('OWNER_INVESTIGATE_LOCAL_OBSERVATIONS');
+      }
     }
     let { priority, classification, nextAction } = triage;
     // P0/P1 are journal/controller investigation priorities. A recent
