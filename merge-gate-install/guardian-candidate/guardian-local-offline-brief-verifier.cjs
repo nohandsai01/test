@@ -254,4 +254,157 @@ function verifyBundle(input) {
     });
   }
 }
-module.exports = Object.freeze({ verifyBrief, makeBundle, verifyBundle });
+
+/**
+ * A checksum-valid brief is still unauthenticated. Continuity can be
+ * observed STRUCTURALLY ONLY when both snapshots expose their entire
+ * bounded journal (at most 10 terminal receipts). A partial latest-page
+ * window is never enough to prove continuity or absence of removed rows.
+ *
+ * Events are newest first. The older complete array must equal the
+ * older suffix of the newer complete array; all appended events must
+ * account for the change in the recorded failure count. No trust upgrade.
+ */
+function sameEvent(a, b) {
+  return E.every((field) => a[field] === b[field]);
+}
+function continuityReceipt(reason, older = null, newer = null, delta = 0) {
+  const matched = reason === 'GUARDIAN_BRIEF_SAME_LOCAL_SNAPSHOT' ||
+    reason === 'GUARDIAN_BRIEF_STRUCTURAL_APPEND_COMPATIBLE';
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'GUARDIAN_LOCAL_BRIEF_CONTINUITY_V1',
+    status: 'SOURCE_ONLY_HOLD',
+    authority: 'LOCAL_UNAUTHENTICATED_OBSERVATION',
+    comparison: matched ? 'LOCAL_STRUCTURAL_OBSERVATION_ONLY' : 'NOT_VERIFIED',
+    reason,
+    olderJournalSha256: matched ? older.journalSha256 : null,
+    newerJournalSha256: matched ? newer.journalSha256 : null,
+    olderEntryCount: matched ? older.journalEntries : 0,
+    newerEntryCount: matched ? newer.journalEntries : 0,
+    appendedEntries: matched ? delta : 0,
+    liveness: 'NOT_PROVEN',
+    custodyVerified: false,
+    manualInterventionRequired: true,
+    automaticRestartAllowed: false,
+    activationAllowed: false,
+    releaseAuthority: 'NOT_ISSUED',
+  });
+}
+function compareVerifiedBriefs(older, newer) {
+  if (!older || !newer || older.classification !== 'LOCAL_BRIEF_CONSISTENT' ||
+      newer.classification !== 'LOCAL_BRIEF_CONSISTENT') {
+    return continuityReceipt('GUARDIAN_BRIEF_CONTINUITY_SOURCE_UNVERIFIED');
+  }
+  // A bounded page with a hidden history is not a complete baseline.
+  // The bundle may still be checksum-valid, but continuity is NOT_PROVEN.
+  if (older.journalEntries > 10 || newer.journalEntries > 10 ||
+      older.events.length !== older.journalEntries ||
+      newer.events.length !== newer.journalEntries) {
+    return continuityReceipt('GUARDIAN_BRIEF_CONTINUITY_INCOMPLETE_HISTORY');
+  }
+  const delta = newer.journalEntries - older.journalEntries;
+  if (delta < 0 || delta > 10 ||
+      newer.historicalFailureCount < older.historicalFailureCount ||
+      (delta === 0 && (older.journalSha256 !== newer.journalSha256 ||
+        older.historicalFailureCount !== newer.historicalFailureCount)) ||
+      (delta > 0 && older.journalSha256 === newer.journalSha256)) {
+    return continuityReceipt('GUARDIAN_BRIEF_CONTINUITY_CONFLICT');
+  }
+  // A duplicate UUID in different snapshots with changed event contents,
+  // a reordering, or a truncated history is never a compatible append.
+  for (let i = 0; i < older.events.length; i++) {
+    if (!sameEvent(older.events[i], newer.events[i + delta])) {
+      return continuityReceipt('GUARDIAN_BRIEF_CONTINUITY_CONFLICT');
+    }
+  }
+  let newlyFailed = 0;
+  for (let i = 0; i < delta; i++) {
+    if (newer.events[i].state === 'FAILED') newlyFailed++;
+  }
+  if (newer.historicalFailureCount - older.historicalFailureCount !== newlyFailed) {
+    return continuityReceipt('GUARDIAN_BRIEF_CONTINUITY_CONFLICT');
+  }
+  if (delta === 0) {
+    return continuityReceipt('GUARDIAN_BRIEF_SAME_LOCAL_SNAPSHOT', older, newer);
+  }
+  return continuityReceipt('GUARDIAN_BRIEF_STRUCTURAL_APPEND_COMPATIBLE',
+    older, newer, delta);
+}
+function readBrief(input) {
+  try {
+    if (typeof input === 'string' &&
+        Buffer.byteLength(input, 'utf8') > MAX_BYTES) return null;
+    const value = typeof input === 'string' ?
+      parseUniqueKeySourceLock(Buffer.from(input, 'utf8')) : input;
+    return cleanBrief(value);
+  } catch (_) { return null; }
+}
+function compareBriefHistory(older, newer) {
+  return compareVerifiedBriefs(readBrief(older), readBrief(newer));
+}
+function verifyBundleHistory(input) {
+  try {
+    if (typeof input === 'string' &&
+        Buffer.byteLength(input, 'utf8') > MAX_BYTES) {
+      throw new Error('oversize');
+    }
+    const obj = typeof input === 'string' ?
+      parseUniqueKeySourceLock(Buffer.from(input, 'utf8')) : input;
+    const validated = verifyBundle(obj);
+    if (validated.comparison !== 'MATCH_LOCAL_CHECKSUM_ONLY') {
+      throw new Error('invalid bundle digest');
+    }
+    const values = safeArray(obj.briefs, MAX_BUNDLE);
+    if (!values || values.length < 2) {
+      throw new Error('too few snapshots');
+    }
+    const normalized = values.map(cleanBrief);
+    if (normalized.some((x) => !x)) throw new Error('invalid member');
+    const comparisons = [];
+    for (let i = 1; i < normalized.length; i++) {
+      const result = compareVerifiedBriefs(normalized[i - 1], normalized[i]);
+      if (result.comparison !== 'LOCAL_STRUCTURAL_OBSERVATION_ONLY') {
+        return Object.freeze({
+          schemaVersion: 1, kind: 'GUARDIAN_LOCAL_BRIEF_HISTORY_V1',
+          status: 'SOURCE_ONLY_HOLD', reason: result.reason,
+          comparison: 'NOT_VERIFIED',
+          bundleSha256: null, comparisons: Object.freeze([]),
+          liveness: 'NOT_PROVEN', custodyVerified: false,
+          manualInterventionRequired: true,
+          automaticRestartAllowed: false, activationAllowed: false,
+          releaseAuthority: 'NOT_ISSUED',
+        });
+      }
+      comparisons.push(result);
+    }
+    return Object.freeze({
+      schemaVersion: 1, kind: 'GUARDIAN_LOCAL_BRIEF_HISTORY_V1',
+      status: 'SOURCE_ONLY_HOLD',
+      reason: 'GUARDIAN_BRIEF_BUNDLE_HISTORY_STRUCTURALLY_COMPATIBLE',
+      comparison: 'LOCAL_STRUCTURAL_OBSERVATION_ONLY',
+      bundleSha256: validated.bundleSha256,
+      comparisons: Object.freeze(comparisons),
+      liveness: 'NOT_PROVEN', custodyVerified: false,
+      manualInterventionRequired: true,
+      automaticRestartAllowed: false, activationAllowed: false,
+      releaseAuthority: 'NOT_ISSUED',
+    });
+  } catch (_) {
+    return Object.freeze({
+      schemaVersion: 1, kind: 'GUARDIAN_LOCAL_BRIEF_HISTORY_V1',
+      status: 'SOURCE_ONLY_HOLD',
+      reason: 'GUARDIAN_BRIEF_BUNDLE_HISTORY_UNVERIFIED',
+      comparison: 'NOT_VERIFIED',
+      bundleSha256: null, comparisons: Object.freeze([]),
+      liveness: 'NOT_PROVEN', custodyVerified: false,
+      manualInterventionRequired: true,
+      automaticRestartAllowed: false, activationAllowed: false,
+      releaseAuthority: 'NOT_ISSUED',
+    });
+  }
+}
+module.exports = Object.freeze({
+  verifyBrief, makeBundle, verifyBundle,
+  compareBriefHistory, verifyBundleHistory,
+});
