@@ -12,12 +12,14 @@ const STATES = new Set(['CREATED', 'STARTING', 'RUNNING', 'STOPPING',
   'STOPPED', 'FAILED']);
 const ERROR = /^GUARDIAN_[A-Z0-9_]{1,100}$/;
 const SHA = /^[0-9a-f]{64}$/;
+const GENERATION = /^[0-9a-f]{32}$/;
 const CLASSIFICATIONS = Object.freeze({
   P0: Object.freeze({
     EVIDENCE_UNVERIFIED: 'OWNER_INVESTIGATE_LOCAL_EVIDENCE',
   }),
   P1: Object.freeze({
     RECORDED_FAILURE: 'OWNER_REVIEW_FAULT_HISTORY',
+    UNTERMINATED_GENERATION: 'OWNER_RECONCILE_INTERRUPTED_GENERATION',
     CONTROLLER_FAILED: 'OWNER_INVESTIGATE_CONTROLLER_FAILURE',
   }),
   P2: Object.freeze({
@@ -40,21 +42,25 @@ function safeState(controller) {
     // properties or return a raw ChildProcess/controller object.
     const { state, pid, errorCode, activationAllowed, releaseAuthority,
       automaticRestartAllowed } = x;
+    // A reused PID must never make two process generations look alike.
+    const generationId = x.generationId ?? null;
     if (!STATES.has(state) ||
+        !(generationId === null ||
+          (typeof generationId === 'string' && GENERATION.test(generationId))) ||
         !(pid === null || (Number.isSafeInteger(pid) && pid > 0)) ||
         !(errorCode === null ||
           (typeof errorCode === 'string' && ERROR.test(errorCode))) ||
         activationAllowed !== false ||
         releaseAuthority !== 'NOT_ISSUED' ||
         automaticRestartAllowed !== false) return null;
-    return Object.freeze({ state, pid, errorCode });
+    return Object.freeze({ state, pid, errorCode, generationId });
   } catch (_) {
     return null;
   }
 }
 function sameState(a, b) {
   return a && b && a.state === b.state && a.pid === b.pid &&
-    a.errorCode === b.errorCode;
+    a.errorCode === b.errorCode && a.generationId === b.generationId;
 }
 function safeTriage(x) {
   try {
@@ -71,6 +77,11 @@ function safeTriage(x) {
         !Number.isSafeInteger(x.journalEntries) || x.journalEntries < 0 ||
         !Number.isSafeInteger(x.failureCount) || x.failureCount < 0 ||
         x.failureCount > x.journalEntries ||
+        !Number.isSafeInteger(x.unterminatedGenerations) ||
+        x.unterminatedGenerations < 0 ||
+        (x.classification === 'UNTERMINATED_GENERATION') !==
+          (x.failureCount === 0 && x.unterminatedGenerations > 0) ||
+        (x.priority === 'P3' && x.unterminatedGenerations !== 0) ||
         !(x.journalSha256 === null ||
           (typeof x.journalSha256 === 'string' && SHA.test(x.journalSha256))) ||
         x.manualInterventionRequired !== (x.priority !== 'P3') ||
@@ -88,6 +99,7 @@ function safeTriage(x) {
       processState: x.processState,
       journalEntries: x.journalEntries, journalSha256: x.journalSha256,
       failureCount: x.failureCount,
+      unterminatedGenerations: x.unterminatedGenerations,
     });
   } catch (_) {
     return null;
@@ -105,7 +117,8 @@ function sameTriage(a, b) {
     a.processState === b.processState &&
     a.journalEntries === b.journalEntries &&
     a.journalSha256 === b.journalSha256 &&
-    a.failureCount === b.failureCount;
+    a.failureCount === b.failureCount &&
+    a.unterminatedGenerations === b.unterminatedGenerations;
 }
 function safeHealth(x) {
   try {
@@ -168,6 +181,7 @@ function envelope({ priority, classification, nextAction, processState,
     journalSha256: triage?.journalSha256 ?? null,
     journalEntries: triage?.journalEntries ?? 0,
     historicalFailureCount: triage?.failureCount ?? 0,
+    unterminatedGenerations: triage?.unterminatedGenerations ?? 0,
     liveness: 'NOT_PROVEN',
     manualInterventionRequired: priority !== 'P3',
     automaticRestartAllowed: false,

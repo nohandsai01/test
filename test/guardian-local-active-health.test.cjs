@@ -73,14 +73,14 @@ test('real protected worker answers an active IPC + loopback health query only a
     const actual = await session.operator.probeRuntime();
     verified(actual);
     assert.equal(actual.processState, 'RUNNING');
-    assert.equal(fs.readdirSync(directory).length, 0);
+    assert.equal(fs.readdirSync(directory).length, 1); // generation ledger only
     // A second health probe checks afresh, rather than trusting READY forever.
     verified(await session.operator.probeRuntime());
     assert.equal((await session.owner.stop()).state, 'STOPPED');
     const after = await session.operator.probeRuntime();
     unverified(after);
     assert.equal(after.processState, 'STOPPED');
-    assert.equal(fs.readdirSync(directory).length, 1);
+    assert.equal(fs.readdirSync(directory).length, 2); // journal + generation ledger
   });
 });
 

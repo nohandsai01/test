@@ -1295,6 +1295,52 @@ the second read with exceptions/getters, and expire a RECENT observation
 while the second read is delayed. No reviewer or production activation
 is performed mid-batch.
 
+## G27–G30 — durable process generation identity and crash evidence (source-only)
+
+Every Controller start() issues one fresh 128-bit process generation that
+is never reused in-process. When the Owner session wires `onLaunch`, the
+generation is appended synchronously to an owner-only, append-only ledger
+(`<journal>.generations.jsonl`) BEFORE the child is spawned; a ledger
+failure refuses the spawn (GUARDIAN_CHILD_LAUNCH_RECORD_FAILED). A PID is
+an OS handle that may be reused; the generation is the identity.
+
+The child IPC protocol is NOHANDS_GUARDIAN_CHILD_V2. After its local health
+check the child sends HELLO; the parent answers one BIND carrying the
+generation it issued, and the child accepts only the first BIND. READY,
+HEALTH_PROBE, HEALTH_RESULT and TERMINAL all carry that generation. A
+well-formed frame for another generation fails closed with
+GUARDIAN_CHILD_GENERATION_MISMATCH; READY before BIND, a second HELLO or a
+replayed (already answered) health result is GUARDIAN_CHILD_PROTOCOL_INVALID.
+A child never answers a probe for a foreign generation.
+
+Terminal receipts produced by the Controller are written as schemaVersion 2
+with `generationId`; legacy schemaVersion 1 receipts stay readable but can
+never close a launched generation. Diagnostics joins journal and ledger:
+
+- a launched generation without a terminal receipt — other than the
+  Controller's own still-live generation — is P1 UNTERMINATED_GENERATION
+  (OWNER_RECONCILE_INTERRUPTED_GENERATION). Later clean generations never
+  clear it; only owner-side reconciliation outside this source can;
+- a duplicate terminal (replay), a terminal for an unknown generation, a
+  reused ledger generation, a bound receipt without any ledger, a live
+  Controller generation absent from the ledger or a corrupted ledger is P0;
+- a Controller generation that changes during a read is rejected, as is a
+  change of state/PID/errorCode (G26 bracketing is preserved).
+
+Health samples and runtime-assessment status brackets compare generation as
+well as PID, so a reused PID cannot make an old sample or snapshot describe
+a new process. Concurrent Owner sessions sharing one journal see each
+other's live generations as unterminated (fail-closed HOLD) until all stop.
+
+Limits: journal and ledger are local, unauthenticated evidence. Deleting
+BOTH files is indistinguishable from a fresh baseline; incident evidence
+packets keep their G19 format and do not carry the generation. All results
+remain liveness=NOT_PROVEN, activationAllowed=false,
+releaseAuthority=NOT_ISSUED, automaticRestartAllowed=false and
+SOURCE_ONLY_HOLD. Negative tests include a real parent SIGKILL, PID reuse,
+foreign/unbound/rebind frames, replayed health results, start/stop races
+and concurrent sessions.
+
 ## G31A — read-only terminal callback / receipt persistence diagnosis
 
 The separated Operator facade exposes diagnoseTerminalPersistence(), a
@@ -1377,3 +1423,179 @@ successful write. The pre-append prefix is rechecked after fsync. Detected
 drift fails closed without repair, rotation, deletion or release authority.
 New writer instances cannot attest preexisting history; cross-process TOCTOU
 races remain. No signed witness, cross-process lock or Check authority added.
+
+
+## G27-G30 post-batch integration: same-process concurrency + V2 incident binding
+
+This isolated follow-on batch starts from PR #19 exact Head
+d627a162f02c974f7c064a6d0c401452eb5f2436 and leaves the original
+Writer branch unchanged.
+
+- The owner-only launch ledger still records each generation before spawn.
+  The local journal additionally keeps a VOLATILE per-journal same-Node-
+  process live witness, set ONLY after the parent verifies the V2 READY
+  frame for its durable launch generation; it is retired on terminal
+  callback (even when its terminal journal write fails).
+  It is not an OS attestation, cross-process lease or PID health proof.
+- Diagnostics reconciles an explicitly locally witnessed concurrent
+  generation against a genuinely unexplained open generation.
+  Concurrent local sessions are P2 PROCESS_STATE_UNPROVEN with HOLD,
+  rather than a false crash P1. Missing terminal without a local
+  witness remains P1 UNTERMINATED_GENERATION even if a newer session
+  finishes normally. Invalid or conflicting ledger/receipt is P0.
+- Generation-bound FAILED incident packets now use schema V2 with
+  generationId and launchLedgerSha256 included in canonical evidence
+  SHA-256, plus minimal generation fields on referenced neighbor
+  receipts. The independent verifier rereads the protected, pinned
+  owner-only launch ledger, validates SHA-256, duplicate/replayed launch
+  IDs and terminal-to-launch binding, and prevents V2 packet downgrade
+  to V1. Legacy V1 incident packets remain valid only when the selected
+  FAILED receipt is actually legacy V1.
+- Every observation remains SOURCE_ONLY_HOLD, liveness NOT_PROVEN,
+  custodyVerified false, automaticRestartAllowed false and
+  releaseAuthority NOT_ISSUED. An incident checksum match is NOT a
+  signature, custody attestation, release grant or process-liveness proof.
+
+Known limitation: same-process witness cannot attest a distinct OS
+process, and an unknown external unclosed generation remains a P1
+owner-reconciliation HOLD. Deleting both journal and ledger still
+requires a separately trusted external baseline; compromising same-UID
+source bytes is outside the local model. No Merge, Deploy, real D1,
+Check, keys or production mutation is part of this batch.
+
+
+## G31 — paired local launch ledger / terminal journal read consistency
+
+Source-only G31 hardens the existing V2 generation-bound evidence reader.
+The independent local Diagnostics now reads Journal A, Ledger B,
+Journal A-prime and Ledger B-prime. Both reads of each file must
+agree byte-for-byte on content, inode/device, size and modification
+metadata. A source becoming present or missing during observation,
+changing in place, gaining a new receipt, or being replaced by a new
+inode with byte-identical content returns a fixed P0/HOLD diagnostic.
+There is no automatic retry, repair, release, lock deletion or write.
+
+The separate Incident Evidence Verifier independently reopens Journal
+and Ledger after the initial checks. A V2 packet remains only a local
+checksum match if both journal snapshots agree and both protected
+ledger snapshots agree on digest, inode/device and metadata. Stale
+packets or conflicting generations remain NOT_VERIFIED, with no
+claimed custody or process liveness.
+
+The bounded full-suite and negative tests exercise actual owner-only
+temporary JSONL files and controlled journal/ledger changes during
+each read phase, including equal-byte inode substitution and legacy
+missing-store behavior. This is not an atomic multi-file filesystem
+transaction: changes that are fully reverted between reads (ABA),
+privileged same-UID tampering, deletion of BOTH journals before a
+new observer starts and absence of a trusted external anchor remain
+outside the proof. V1/V2 compatibility and fail-closed HOLD remain.
+No live D1/App/Check/credential/Deploy or Merge is authorized.
+
+
+## G32 — ephemeral, read-only local generation baseline witness
+
+guardian-local-baseline-witness.cjs is an isolated, inert observer
+createGuardianLocalBaselineWitness({directory,fileName,maxBytes?}).
+It does not make an authoritative baseline, generate signing material,
+write/repair anything, lock files, start/restart processes, publish
+Checks or mutate an existing owner/Operator session.
+
+- On the FIRST inspection, both missing files return
+  UNATTESTED_DUAL_ABSENCE / NOT_VERIFIED. Both present and structurally
+  consistent files can establish only an UNANCHORED local memory snapshot
+  (no historical completeness or protected external anchor).
+- The SAME observer requires every later Journal and Ledger snapshot to
+  retain its prior bytes as a prefix on the SAME owner-only regular-file
+  inode. A missing/replaced/truncated file, lost permissions, invalid
+  record, or in-flight pair drift permanently latches the observer to
+  HOLD, even if the original content later reappears.
+- Each observation validates both files through protected local
+  Diagnostics and separate before/after owner-only path/inode/byte
+  checks. All results retain custodyVerified=false,
+  externalAnchorVerified=false, historicalCompletenessVerified=false,
+  liveness=NOT_PROVEN, automaticRestartAllowed=false and
+  releaseAuthority=NOT_ISSUED.
+
+**Non-claims:** A NEW observer cannot distinguish an installation whose
+two files were deleted before the observer started from a never-used
+installation. A source-only in-memory witness is not durable custody,
+cannot survive process restart and cannot rule out ABA modifications
+that return to identical state between reads, same-UID compromise or
+forged full-file histories. A protected, separately authorized external
+anchor would be needed to close that trust gap; this work does NOT
+create or register one.
+
+
+## G33 — Source-only external baseline READ-ONLY verification interface
+
+The inert guardian-external-baseline-verifier.cjs module defines
+createGuardianExternalBaselineVerifier for an OWNER-SUPPLIED, previously
+pinned ED25519 SPKI public key and SHA-256 fingerprint, fixed anchorId,
+owner-only journal directory and derived sibling generation ledger.
+No key generation, key registration, remote trust registry, crypto key
+management, signing service, deployment, D1, GitHub App or Check writes
+are performed by this source module.
+
+The input is a bounded UTF-8 JSON TEXT envelope only, never a filesystem
+path or provider object. Required exact fields: schemaVersion=1, kind,
+scope=NOHANDS_GUARDIAN_GENERATION_PAIR_SOURCE_ONLY, anchorId,
+sequence (positive safe integer), observedAt (strict UTC ISO timestamp),
+journalSha256, ledgerSha256, journalBytes, ledgerBytes,
+algorithm=Ed25519, signatureBase64. Signing uses domain-separated
+NOHANDS_GUARDIAN_EXTERNAL_BASELINE_V1 followed by newline and the
+fixed-order JSON of the preceding unsigned fields. This source-only
+module verifies the signature against an owner-supplied pinned public
+key (SPKI SHA-256) and prevents reuse of a sequence number within the
+same verifier instance, but cannot prove public-key trust provenance,
+real signing authority, durable antirollback or wall-clock freshness.
+
+A valid signature is insufficient: the verifier must independently
+read both local files in owner-only directories via O_RDONLY and
+O_NOFOLLOW, compare complete SHA-256 and byte lengths against the
+signed envelope, validate generation ledger vs terminal journal with
+existing G31 Diagnostics, then read BOTH files again and require
+identical bytes, inode, metadata, permissions and owner scope.
+Any missing, malformed, truncated, replaced, mismatched or racing
+source returns NOT_VERIFIED and SOURCE_ONLY_HOLD. No retry, automatic
+repair, credential use or HOLD clearing can occur.
+
+A successful local comparison returns
+LOCAL_SIGNATURE_AND_PAIR_MATCH_ONLY with
+pinnedSignerSignatureValid=true, but **externalAnchorVerified=false,
+historicalCompletenessVerified=false, custodyVerified=false,
+liveness=NOT_PROVEN, releaseAuthority=NOT_ISSUED**. An attacker who
+controls the public-key pin can create a different apparently valid
+test key and signature, hence this interface must never self-enroll
+or self-authorize external trust. Production publisher identity,
+external append-only custody, signer approval and immutable baseline
+must be separately authorized and independently verified.
+
+Tests generate ephemeral Ed25519 keypairs only IN THE TEST FIXTURE,
+without persisting or provisioning a real key; they cover real owner-
+only JSONL records, forged or changed signed fields, invalid pin,
+wrong anchor, sequence replay, malformed nested JSON, symlink/hardlink
+or permission defects, ledger corruption and in-flight changes.
+No real trusted anchor, payment, Merge, Deploy, Check or app mutation.
+
+## G36A — generation V2 / protected receipt-writer integration (source-only)
+
+An isolated branch layers the existing PR #19/#20 generation protocol,
+paired journal diagnostics and external baseline verification onto PR #25's
+G35A in-memory byte-continuity writer. Both the receipt JSONL file and the
+derived generation-launch JSONL file now receive the same guarded, bounded,
+synchronous append protections. The launch ledger is no longer a weaker
+O_WRONLY writer: inode/path identity, directory ownership, link count,
+private file modes, valid trailing line, exact committed byte count and
+SHA-256 continuity are rechecked on future appends and after fsync.
+It refuses detectable same-inode rewrites, complete-line truncation,
+replacement, symlink/hardlink substitution and unexpected external appends.
+
+The preexisting V2 generation-bound receipt format, local READY witness,
+paired offline diagnostics and explicit HOLD are preserved; legacy v1
+receipts remain historical-only. Tests directly exercise both streams.
+A new instance cannot prove prior contents; this is neither an atomic
+multi-process lock nor signed custody proof. Concurrent writers to one
+ledger may fail closed on observed drift rather than silently extending
+one another's local snapshots. No Check, restart, release or production
+authority is introduced. PR #15 and other Writers' branches are unchanged.

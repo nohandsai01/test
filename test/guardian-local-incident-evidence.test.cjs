@@ -49,8 +49,14 @@ function reader(directory, ctrl = controller()) {
   });
 }
 function assertHold(packet) {
-  assert.equal(packet.schemaVersion, 1);
-  assert.equal(packet.kind, 'GUARDIAN_LOCAL_FAULT_EVIDENCE_V1');
+  assert.ok([1, 2].includes(packet.schemaVersion));
+  assert.equal(packet.kind, packet.schemaVersion === 2 ?
+    'GUARDIAN_LOCAL_FAULT_EVIDENCE_V2' :
+    'GUARDIAN_LOCAL_FAULT_EVIDENCE_V1');
+  if (packet.schemaVersion === 2) {
+    assert.match(packet.generationId, /^[0-9a-f]{32}$/);
+    assert.match(packet.launchLedgerSha256, /^[0-9a-f]{64}$/);
+  }
   assert.equal(packet.authority, 'LOCAL_UNAUTHENTICATED_OBSERVATION');
   assert.equal(packet.status, 'SOURCE_ONLY_HOLD');
   assert.equal(packet.liveness, 'NOT_PROVEN');
@@ -64,7 +70,8 @@ function minimalReceipt(row) {
   if (row === null) return;
   assert.ok(Object.isFrozen(row));
   assert.deepEqual(Object.keys(row).sort(),
-    ['eventId', 'timestamp', 'state', 'errorCode'].sort());
+    ['eventId', 'timestamp', 'state', 'errorCode',
+      ...(Object.hasOwn(row, 'generationId') ? ['generationId'] : [])].sort());
 }
 function frozenSafe(packet) {
   assertHold(packet);

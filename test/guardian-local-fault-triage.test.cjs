@@ -282,7 +282,9 @@ test('triage never includes PID, filesystem paths, secrets or authorization acti
       'schemaVersion', 'kind', 'authority', 'status',
       'priority', 'classification', 'nextAction', 'sourceReason',
       'processState', 'liveness', 'journalEntries', 'journalSha256',
-      'failureCount', 'firstFailure', 'latestFailure', 'lastTerminal',
+      'failureCount', 'unterminatedGenerations', 'concurrentGenerations',
+      'firstFailure',
+      'latestFailure', 'lastTerminal',
       'manualInterventionRequired', 'automaticRestartAllowed',
       'activationAllowed', 'releaseAuthority',
     ].sort());

@@ -6,23 +6,39 @@
  * Import and construction are inert. Only explicit start() creates a runner,
  * starts the protected host, probes its local health endpoint and sends READY.
  * Only the existing Supervisor can emit a terminal signal receipt.
+ *
+ * G27: after local health is verified and before READY, the child sends
+ * HELLO and accepts exactly one parent BIND generation. Every later frame
+ * carries that generation; probes for any other generation get no answer.
  */
 'use strict';
 
 const http = require('node:http');
 
-const PROTOCOL = 'NOHANDS_GUARDIAN_CHILD_V1';
-function probeFrame(value) {
+const PROTOCOL = 'NOHANDS_GUARDIAN_CHILD_V2';
+const GENERATION = /^[0-9a-f]{32}$/;
+function exactFrame(value, keys) {
   return value !== null && typeof value === 'object' &&
     !Array.isArray(value) &&
-    Object.keys(value).length === 5 &&
-    ['protocol', 'event', 'challenge', 'activationAllowed',
-      'releaseAuthority'].every((key) => Object.hasOwn(value, key)) &&
-    value.protocol === PROTOCOL && value.event === 'HEALTH_PROBE' &&
-    typeof value.challenge === 'string' &&
-    /^[0-9a-f]{32}$/.test(value.challenge) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key)) &&
+    value.protocol === PROTOCOL &&
     value.activationAllowed === false &&
     value.releaseAuthority === 'NOT_ISSUED';
+}
+function bindFrame(value) {
+  return exactFrame(value, ['protocol', 'event', 'generation',
+    'activationAllowed', 'releaseAuthority']) &&
+    value.event === 'BIND' && typeof value.generation === 'string' &&
+    GENERATION.test(value.generation);
+}
+function probeFrame(value) {
+  return exactFrame(value, ['protocol', 'event', 'generation', 'challenge',
+    'activationAllowed', 'releaseAuthority']) &&
+    value.event === 'HEALTH_PROBE' &&
+    typeof value.generation === 'string' &&
+    typeof value.challenge === 'string' &&
+    /^[0-9a-f]{32}$/.test(value.challenge);
 }
 function childError(code) {
   const e = new Error(code);
@@ -92,15 +108,19 @@ function probeLocalHealth(address, port, timeoutMs) {
 }
 
 function createGuardianChildRuntime({ createRunner, ipc = process,
-  healthTimeoutMs = 1500 } = {}) {
+  healthTimeoutMs = 1500, bindTimeoutMs = 2000 } = {}) {
   if (typeof createRunner !== 'function' ||
       !ipc || typeof ipc.send !== 'function' ||
       typeof ipc.disconnect !== 'function' ||
       !Number.isSafeInteger(healthTimeoutMs) || healthTimeoutMs < 50 ||
-      healthTimeoutMs > 5000) {
+      healthTimeoutMs > 5000 ||
+      !Number.isSafeInteger(bindTimeoutMs) || bindTimeoutMs < 50 ||
+      bindTimeoutMs > 10_000) {
     throw childError('GUARDIAN_CHILD_RUNTIME_CONFIG_INVALID');
   }
   let state = 'CREATED', runner = null, terminalSent = false;
+  // Set once from the first valid BIND; never replaced by a later BIND.
+  let generation = null, bindWaiter = null;
   function send(frame) {
     return new Promise((resolve, reject) => {
       if (ipc.connected === false) {
@@ -122,21 +142,57 @@ function createGuardianChildRuntime({ createRunner, ipc = process,
       receipt?.activationAllowed === false ? 'STOPPED' : 'FAILED';
     // Only a clean stop can produce the parent's accepted TERMINAL. Bad
     // termination is deliberately rejected by the parent fail-closed logic.
+    // An unbound child has no identity to report; it only disconnects and
+    // the parent records its exit as unverified.
+    const disconnect = () => {
+      try { if (ipc.connected) ipc.disconnect(); } catch (_) {}
+    };
+    if (generation === null) {
+      disconnect();
+      return;
+    }
     const frame = {
-      protocol: PROTOCOL, event: 'TERMINAL', state,
+      protocol: PROTOCOL, event: 'TERMINAL', generation, state,
       hostStopped: state === 'STOPPED',
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
     };
-    void send(frame).catch(() => {}).finally(() => {
-      try { if (ipc.connected) ipc.disconnect(); } catch (_) {}
+    void send(frame).catch(() => {}).finally(disconnect);
+  }
+
+  function onFrame(frame) {
+    if (bindFrame(frame)) {
+      // First valid BIND wins; a rebind attempt cannot move this process
+      // to another generation and is otherwise ignored.
+      if (generation === null && bindWaiter) {
+        generation = frame.generation;
+        const waiter = bindWaiter;
+        bindWaiter = null;
+        waiter.resolve();
+      }
+      return;
+    }
+    void onProbe(frame);
+  }
+  let bindTimer = null;
+  function awaitBind() {
+    const pending = new Promise((resolve, reject) => {
+      bindTimer = setTimeout(() => {
+        bindWaiter = null;
+        reject(childError('GUARDIAN_CHILD_BIND_TIMEOUT'));
+      }, bindTimeoutMs);
+      bindWaiter = { resolve: () => { clearTimeout(bindTimer); resolve(); } };
     });
+    // A failed HELLO send abandons this promise; never leave it unhandled.
+    pending.catch(() => {});
+    return pending;
   }
 
   let probing = false;
   async function onProbe(frame) {
     // IPC is private to the owned parent. Reject unrecognized challenge
-    // shapes without interpreting them as a trusted command.
-    if (!probeFrame(frame)) return;
+    // shapes and probes for any other generation without answering them.
+    if (!probeFrame(frame) || generation === null ||
+        frame.generation !== generation) return;
     let healthy = false;
     if (state === 'RUNNING' && !terminalSent && !probing) {
       probing = true;
@@ -160,7 +216,7 @@ function createGuardianChildRuntime({ createRunner, ipc = process,
     // Never send host status or secrets over IPC; only challenge match and
     // a fresh boolean observation are visible to the parent.
     void send({
-      protocol: PROTOCOL, event: 'HEALTH_RESULT',
+      protocol: PROTOCOL, event: 'HEALTH_RESULT', generation,
       challenge: frame.challenge, healthy,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
     }).catch(() => {});
@@ -191,20 +247,32 @@ function createGuardianChildRuntime({ createRunner, ipc = process,
           final.loopback.port !== initial.loopback.port) {
         throw childError('GUARDIAN_CHILD_RUNNER_STATE_DRIFT');
       }
-      // Register before READY: otherwise the parent may issue a probe
-      // between receiving READY and the child's message listener setup.
+      // Register before HELLO: otherwise BIND (or a probe right after
+      // READY) could arrive before the child's message listener exists.
       if (typeof ipc.on !== 'function') {
         throw childError('GUARDIAN_CHILD_IPC_LISTENER_UNAVAILABLE');
       }
+      ipc.on('message', onFrame);
+      const bind = awaitBind();
+      await send({ protocol: PROTOCOL, event: 'HELLO',
+        activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
+      await bind;
+      const bound = runner.status();
+      if (!validateStatus(bound) || terminalSent ||
+          bound.loopback.address !== initial.loopback.address ||
+          bound.loopback.port !== initial.loopback.port) {
+        throw childError('GUARDIAN_CHILD_RUNNER_STATE_DRIFT');
+      }
       state = 'RUNNING';
-      ipc.on('message', onProbe);
-      await send({ protocol: PROTOCOL, event: 'READY',
+      await send({ protocol: PROTOCOL, event: 'READY', generation,
         state: 'RUNNING', activationAllowed: false,
         releaseAuthority: 'NOT_ISSUED' });
       return Object.freeze({ state, healthVerified: true,
         activationAllowed: false, releaseAuthority: 'NOT_ISSUED' });
     } catch (_) {
       state = 'FAILED';
+      clearTimeout(bindTimer);
+      bindWaiter = null;
       if (runner && !terminalSent) {
         try { await runner.stop(); } catch (_) {}
       }
@@ -216,7 +284,7 @@ function createGuardianChildRuntime({ createRunner, ipc = process,
   }
   function status() {
     return Object.freeze({
-      state, healthVerified: state === 'RUNNING',
+      state, healthVerified: state === 'RUNNING', generationBound: generation !== null,
       activationAllowed: false, releaseAuthority: 'NOT_ISSUED',
     });
   }

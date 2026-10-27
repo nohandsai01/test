@@ -38,6 +38,7 @@ function triage(priority = 'P2', options = {}) {
     processState: priority === 'P3' ? 'STOPPED' : 'RUNNING',
     liveness: 'NOT_PROVEN', journalEntries: 2, journalSha256: sha,
     failureCount: priority === 'P1' ? 1 : 0,
+    unterminatedGenerations: 0,
     manualInterventionRequired: priority !== 'P3',
     automaticRestartAllowed: false, activationAllowed: false,
     releaseAuthority: 'NOT_ISSUED',
@@ -340,7 +341,7 @@ test('real protected child lifecycle keeps Operator-only assessment passive and 
     assert.equal(stopped.priority, 'P3');
     assert.equal(stopped.healthFreshness, 'UNVERIFIED');
     assert.equal(stopped.manualInterventionRequired, false);
-    assert.equal(fs.readdirSync(directory).length, 1);
+    assert.equal(fs.readdirSync(directory).length, 2); // journal + generation ledger
   });
 });
 

@@ -14,6 +14,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { parseUniqueKeySourceLock } =
   require('../candidate/verify-source-lock.cjs');
+const { generationLedgerName } =
+  require('./guardian-local-receipt-journal.cjs');
 
 const FILE_NAME = /^guardian-[a-z0-9-]{1,50}\.jsonl$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -27,7 +29,12 @@ const STATES = new Set(['CREATED', 'STARTING', 'RUNNING',
 const RECEIPT_FIELDS = Object.freeze(['schemaVersion', 'eventId',
   'timestamp', 'state', 'errorCode', 'hostStopped', 'activationAllowed',
   'releaseAuthority', 'automaticRestartAllowed']);
+// G27 v2 receipts carry the process generation they terminate.
+const BOUND_RECEIPT_FIELDS = Object.freeze([...RECEIPT_FIELDS,
+  'generationId']);
+const GENERATION = /^[0-9a-f]{32}$/;
 const EVENT_FIELDS = Object.freeze(['eventId', 'timestamp', 'state', 'errorCode']);
+const BOUND_EVENT_FIELDS = Object.freeze([...EVENT_FIELDS, 'generationId']);
 // Ordered exactly as G19's evidenceEnvelope uses for JSON/SHA-256.
 const PACKET_FIELDS = Object.freeze(['schemaVersion', 'kind', 'authority',
   'status', 'availability', 'reason', 'sourceReason', 'processState',
@@ -35,9 +42,16 @@ const PACKET_FIELDS = Object.freeze(['schemaVersion', 'kind', 'authority',
   'journalSha256', 'failureCount', 'eventSequence', 'selectedFailure',
   'previousReceipt', 'nextReceipt', 'firstFailure', 'latestFailure',
   'automaticRestartAllowed', 'activationAllowed', 'releaseAuthority']);
+const BOUND_PACKET_FIELDS = Object.freeze([
+  ...PACKET_FIELDS.slice(0, PACKET_FIELDS.indexOf('selectedFailure')),
+  'generationId', 'launchLedgerSha256',
+  ...PACKET_FIELDS.slice(PACKET_FIELDS.indexOf('selectedFailure')),
+]);
 const EVENT_KEYS = new Set(['selectedFailure', 'previousReceipt',
   'nextReceipt', 'firstFailure', 'latestFailure']);
 const EXPECTED_PACKET_KEYS = Object.freeze([...PACKET_FIELDS,
+  'evidenceSha256']);
+const BOUND_PACKET_KEYS = Object.freeze([...BOUND_PACKET_FIELDS,
   'evidenceSha256']);
 
 function object(value) {
@@ -62,10 +76,13 @@ function copyExactData(value, fields) {
     return copy;
   } catch (_) { return null; }
 }
-function asValidEvent(value) {
+function asValidEvent(value, bound = false) {
   if (value === null) return null;
-  const event = copyExactData(value, EVENT_FIELDS);
-  if (!event || typeof event.eventId !== 'string' ||
+  const event = copyExactData(value, bound ? BOUND_EVENT_FIELDS : EVENT_FIELDS);
+  if (!event || (bound && !(event.generationId === null ||
+        (typeof event.generationId === 'string' &&
+         GENERATION.test(event.generationId)))) ||
+      typeof event.eventId !== 'string' ||
       !EVENT_ID.test(event.eventId) ||
       typeof event.timestamp !== 'string' ||
       !TIMESTAMP.test(event.timestamp) ||
@@ -77,15 +94,22 @@ function asValidEvent(value) {
   return event;
 }
 function validatePacket(value) {
-  const fields = copyExactData(value, EXPECTED_PACKET_KEYS);
+  const fields = copyExactData(value, BOUND_PACKET_KEYS) ??
+    copyExactData(value, EXPECTED_PACKET_KEYS);
   if (!fields) return null;
+  const bound = Object.hasOwn(fields, 'generationId');
   for (const field of EVENT_KEYS) {
-    const event = asValidEvent(fields[field]);
+    const event = asValidEvent(fields[field], bound);
     if (event === undefined) return null;
     fields[field] = event;
   }
-  if (fields.schemaVersion !== 1 ||
-      fields.kind !== 'GUARDIAN_LOCAL_FAULT_EVIDENCE_V1' ||
+  if (fields.schemaVersion !== (bound ? 2 : 1) ||
+      fields.kind !== (bound ? 'GUARDIAN_LOCAL_FAULT_EVIDENCE_V2' :
+        'GUARDIAN_LOCAL_FAULT_EVIDENCE_V1') ||
+      (bound && (typeof fields.generationId !== 'string' ||
+        !GENERATION.test(fields.generationId) ||
+        !SHA256.test(fields.launchLedgerSha256) ||
+        fields.selectedFailure?.generationId !== fields.generationId)) ||
       fields.authority !== 'LOCAL_UNAUTHENTICATED_OBSERVATION' ||
       fields.status !== 'SOURCE_ONLY_HOLD' ||
       fields.availability !== 'LOCAL_SNAPSHOT' ||
@@ -113,15 +137,21 @@ function validatePacket(value) {
   // Hash the fixed-order, descriptor-snapshotted packet, NOT the provided
   // object's property iteration order or its own claimed evidenceSha256.
   const canonical = {};
-  for (const field of PACKET_FIELDS) canonical[field] = fields[field];
+  for (const field of (bound ? BOUND_PACKET_FIELDS : PACKET_FIELDS)) {
+    canonical[field] = fields[field];
+  }
   const hash = crypto.createHash('sha256')
     .update(JSON.stringify(canonical), 'utf8').digest('hex');
   if (hash !== fields.evidenceSha256) return null;
   return fields;
 }
 function validReceipt(row) {
-  const record = copyExactData(row, RECEIPT_FIELDS);
-  if (!record || record.schemaVersion !== 1 ||
+  const bound = copyExactData(row, BOUND_RECEIPT_FIELDS);
+  const record = bound ?? copyExactData(row, RECEIPT_FIELDS);
+  if (!record || record.schemaVersion !== (bound ? 2 : 1) ||
+      (bound && !(record.generationId === null ||
+        (typeof record.generationId === 'string' &&
+          GENERATION.test(record.generationId)))) ||
       typeof record.eventId !== 'string' || !EVENT_ID.test(record.eventId) ||
       typeof record.timestamp !== 'string' ||
       !TIMESTAMP.test(record.timestamp) ||
@@ -136,13 +166,16 @@ function validReceipt(row) {
       record.automaticRestartAllowed !== false) return null;
   return record;
 }
-function sameEvent(packetEvent, row) {
+function sameEvent(packetEvent, row, bound) {
+  const fields = bound ? BOUND_EVENT_FIELDS : EVENT_FIELDS;
   return packetEvent !== null && row !== undefined &&
-    EVENT_FIELDS.every((key) => packetEvent[key] === row[key]);
+    fields.every((key) => packetEvent[key] ===
+      (key === 'generationId' ?
+        (row.schemaVersion === 2 ? row.generationId : null) : row[key]));
 }
-function sameOptionalEvent(packetEvent, row) {
+function sameOptionalEvent(packetEvent, row, bound) {
   return row === undefined ? packetEvent === null :
-    sameEvent(packetEvent, row);
+    sameEvent(packetEvent, row, bound);
 }
 function outcome(reason, entries = 0, digest = null) {
   return Object.freeze({
@@ -173,11 +206,15 @@ function matchingIncident(packet, rows) {
       failures.length === 0) return false;
   const index = packet.eventSequence - 1;
   if (rows[index]?.state !== 'FAILED') return false;
-  return sameEvent(packet.selectedFailure, rows[index]) &&
-    sameOptionalEvent(packet.previousReceipt, rows[index - 1]) &&
-    sameOptionalEvent(packet.nextReceipt, rows[index + 1]) &&
-    sameEvent(packet.firstFailure, rows[failures[0]]) &&
-    sameEvent(packet.latestFailure, rows[failures[failures.length - 1]]);
+  const bound = packet.schemaVersion === 2;
+  if (bound ? (rows[index].schemaVersion !== 2 ||
+      rows[index].generationId !== packet.generationId) :
+      rows[index].schemaVersion !== 1) return false;
+  return sameEvent(packet.selectedFailure, rows[index], bound) &&
+    sameOptionalEvent(packet.previousReceipt, rows[index - 1], bound) &&
+    sameOptionalEvent(packet.nextReceipt, rows[index + 1], bound) &&
+    sameEvent(packet.firstFailure, rows[failures[0]], bound) &&
+    sameEvent(packet.latestFailure, rows[failures[failures.length - 1]], bound);
 }
 
 function createGuardianLocalEvidenceVerifier(options) {
@@ -208,6 +245,7 @@ function createGuardianLocalEvidenceVerifier(options) {
     throw new Error('GUARDIAN_EVIDENCE_VERIFIER_DIRECTORY_UNVERIFIED');
   }
   const journal = path.join(directory, options.fileName);
+  const ledger = path.join(directory, generationLedgerName(options.fileName));
   const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
 
   function trustedDirectory() {
@@ -277,6 +315,88 @@ function createGuardianLocalEvidenceVerifier(options) {
     } }
   }
 
+  // Generation-bound packets must independently validate the current
+  // pinned local launch ledger. A journal-only digest cannot prove that
+  // a claimed generation was ever launched, or prevent replayed terminals.
+  function verifyLedger(packet, rows) {
+    if (packet.schemaVersion !== 2) return true; // explicit legacy v1 path
+    if (!trustedDirectory()) return false;
+    let fd;
+    try {
+      fd = fs.openSync(ledger, flags);
+      const initial = fs.fstatSync(fd);
+      if (!initial.isFile() || initial.size < 1 ||
+          initial.size > maxBytes || initial.nlink !== 1 ||
+          (initial.mode & 0o077) !== 0 ||
+          (typeof process.getuid === 'function' &&
+           initial.uid !== process.getuid())) return false;
+      const bytes = Buffer.alloc(initial.size);
+      let off = 0;
+      while (off < bytes.length) {
+        const count = fs.readSync(fd, bytes, off,
+          bytes.length - off, off);
+        if (!Number.isInteger(count) || count <= 0) return false;
+        off += count;
+      }
+      const after = fs.fstatSync(fd), visible = fs.lstatSync(ledger);
+      if (initial.dev !== after.dev || initial.ino !== after.ino ||
+          initial.size !== after.size || initial.mtimeMs !== after.mtimeMs ||
+          initial.ctimeMs !== after.ctimeMs ||
+          visible.dev !== initial.dev || visible.ino !== initial.ino ||
+          visible.isSymbolicLink() || !visible.isFile() ||
+          (visible.mode & 0o077) !== 0 || bytes.at(-1) !== 10 ||
+          !Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes) ||
+          crypto.createHash('sha256').update(bytes).digest('hex') !==
+            packet.launchLedgerSha256) return false;
+      const lines = bytes.toString('utf8').slice(0, -1).split('\n');
+      if (lines.length === 0 || lines.length > MAX_ENTRIES) return false;
+      const launched = new Set(), eventIds = new Set();
+      const LAUNCH_FIELDS = ['schemaVersion', 'kind', 'eventId',
+        'timestamp', 'generationId', 'activationAllowed',
+        'releaseAuthority', 'automaticRestartAllowed'];
+      for (const line of lines) {
+        if (Buffer.byteLength(line) < 2 ||
+            Buffer.byteLength(line) > MAX_LINE_BYTES) return false;
+        const row = copyExactData(
+          parseUniqueKeySourceLock(Buffer.from(line, 'utf8')),
+          LAUNCH_FIELDS);
+        if (!row || row.schemaVersion !== 1 ||
+            row.kind !== 'GUARDIAN_GENERATION_LAUNCH_V1' ||
+            typeof row.eventId !== 'string' ||
+            !EVENT_ID.test(row.eventId) ||
+            typeof row.timestamp !== 'string' ||
+            !TIMESTAMP.test(row.timestamp) ||
+            !Number.isFinite(Date.parse(row.timestamp)) ||
+            typeof row.generationId !== 'string' ||
+            !GENERATION.test(row.generationId) ||
+            row.activationAllowed !== false ||
+            row.releaseAuthority !== 'NOT_ISSUED' ||
+            row.automaticRestartAllowed !== false ||
+            launched.has(row.generationId) ||
+            eventIds.has(row.eventId)) return false;
+        launched.add(row.generationId);
+        eventIds.add(row.eventId);
+      }
+      const terminated = new Set();
+      for (const row of rows) {
+        if (row.schemaVersion !== 2 || row.generationId === null) continue;
+        if (!launched.has(row.generationId) ||
+            terminated.has(row.generationId)) return false;
+        terminated.add(row.generationId);
+      }
+      return launched.has(packet.generationId) &&
+        trustedDirectory() ? Object.freeze({
+          dev: initial.dev, ino: initial.ino,
+          size: initial.size, mtimeMs: initial.mtimeMs,
+          ctimeMs: initial.ctimeMs,
+        }) : false;
+    } catch (_) { return false; }
+    finally {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch (_) {}
+      }
+    }
+  }
   function verify(packet) {
     const received = validatePacket(packet);
     if (!received) return outcome('GUARDIAN_EVIDENCE_PACKET_INVALID');
@@ -287,6 +407,27 @@ function createGuardianLocalEvidenceVerifier(options) {
     }
     if (!matchingIncident(received, snapshot.rows)) {
       return outcome('GUARDIAN_EVIDENCE_PACKET_CONTENT_MISMATCH');
+    }
+    const firstLedger = verifyLedger(received, snapshot.rows);
+    if (!firstLedger) {
+      return outcome('GUARDIAN_EVIDENCE_GENERATION_LEDGER_UNVERIFIED');
+    }
+    if (received.schemaVersion === 2) {
+      // G31: journal A -> ledger B -> journal A' -> ledger B'.
+      // Any observable append/rewrite/replacement between paired reads
+      // invalidates this packet rather than mixing two source versions.
+      const journalAgain = readLocalSnapshot();
+      const secondLedger = journalAgain ?
+        verifyLedger(received, journalAgain.rows) : false;
+      if (!journalAgain ||
+          journalAgain.digest !== snapshot.digest ||
+          journalAgain.fileIdentity.dev !== snapshot.fileIdentity.dev ||
+          journalAgain.fileIdentity.ino !== snapshot.fileIdentity.ino ||
+          !secondLedger ||
+          Object.keys(firstLedger).some((key) =>
+            firstLedger[key] !== secondLedger[key])) {
+        return outcome('GUARDIAN_EVIDENCE_PAIR_CHANGED_DURING_READ');
+      }
     }
     return outcome('GUARDIAN_EVIDENCE_LOCAL_SNAPSHOT_MATCH',
       snapshot.rows.length, snapshot.digest);

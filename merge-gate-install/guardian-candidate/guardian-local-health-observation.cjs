@@ -11,15 +11,23 @@
 const STATES = new Set(['CREATED', 'STARTING', 'RUNNING', 'STOPPING',
   'STOPPED', 'FAILED']);
 const RECEIPT_FIELDS = new Set(['schemaVersion', 'status', 'observation',
-  'reason', 'processState', 'liveness', 'manualInterventionRequired',
-  'activationAllowed', 'releaseAuthority', 'automaticRestartAllowed']);
+  'reason', 'processState', 'generationId', 'liveness',
+  'manualInterventionRequired', 'activationAllowed', 'releaseAuthority',
+  'automaticRestartAllowed']);
+const GENERATION = /^[0-9a-f]{32}$/;
 
 function record(value) {
   return value !== null && typeof value === 'object' &&
     !Array.isArray(value);
 }
+function generationOf(value) {
+  const id = value.generationId ?? null;
+  return id === null || (typeof id === 'string' && GENERATION.test(id)) ?
+    id : undefined;
+}
 function statusSnapshot(value) {
   if (!record(value) || !STATES.has(value.state) ||
+      generationOf(value) === undefined ||
       !(value.pid === null ||
         (Number.isSafeInteger(value.pid) && value.pid > 0)) ||
       !(value.errorCode === null ||
@@ -29,7 +37,7 @@ function statusSnapshot(value) {
       value.releaseAuthority !== 'NOT_ISSUED' ||
       value.automaticRestartAllowed !== false) return null;
   return Object.freeze({ state: value.state, pid: value.pid,
-    errorCode: value.errorCode });
+    errorCode: value.errorCode, generationId: generationOf(value) });
 }
 function isProbeReceipt(value) {
   return record(value) &&
@@ -37,6 +45,7 @@ function isProbeReceipt(value) {
     Object.keys(value).every((key) => RECEIPT_FIELDS.has(key)) &&
     value.schemaVersion === 1 && value.status === 'SOURCE_ONLY_HOLD' &&
     STATES.has(value.processState) &&
+    generationOf(value) !== undefined &&
     typeof value.reason === 'string' &&
     /^GUARDIAN_[A-Z0-9_]{1,100}$/.test(value.reason) &&
     ['LOCAL_CHILD_HEALTH_VERIFIED', 'NOT_PROVEN'].includes(value.observation) &&
@@ -75,10 +84,14 @@ function observation(reason, state, freshness, sample, age, maxAgeMs) {
     releaseAuthority: 'NOT_ISSUED', automaticRestartAllowed: false,
   });
 }
+// G28: PID equality alone is insufficient (an OS may reuse it). A sample
+// is only meaningful for the exact generation that answered the probe.
 function sameChild(a, b) {
   return !!a && !!b && a.state === 'RUNNING' && b.state === 'RUNNING' &&
     a.errorCode === null && b.errorCode === null &&
-    Number.isSafeInteger(a.pid) && a.pid > 0 && a.pid === b.pid;
+    Number.isSafeInteger(a.pid) && a.pid > 0 && a.pid === b.pid &&
+    typeof a.generationId === 'string' &&
+    a.generationId === b.generationId;
 }
 
 function createGuardianLocalHealthObservation({ controller,
@@ -155,6 +168,7 @@ function createGuardianLocalHealthObservation({ controller,
       }
       if (result.observation === 'LOCAL_CHILD_HEALTH_VERIFIED') {
         if (!sameChild(before, after) ||
+            result.generationId !== before.generationId ||
             result.processState !== 'RUNNING' ||
             result.reason !== 'GUARDIAN_CHILD_HEALTH_VERIFIED') {
           return probeDenied('GUARDIAN_HEALTH_CHILD_STATE_CHANGED', after);

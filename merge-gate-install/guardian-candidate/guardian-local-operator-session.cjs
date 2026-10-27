@@ -51,6 +51,10 @@ function createGuardianLocalOperatorSession(options) {
   const controller = createGuardianLocalProcessController({
     cwd: options.cwd, entrypoint: options.entrypoint,
     onTerminal: journal.append,
+    // Each launched generation is durable before its child exists.
+    onLaunch: journal.recordLaunch,
+    // Only a V2 READY verified by the owned parent may mark local liveness.
+    onReady: journal.recordReady,
     ...(options.startupTimeoutMs === undefined ? {} :
       { startupTimeoutMs: options.startupTimeoutMs }),
     ...(options.shutdownTimeoutMs === undefined ? {} :
