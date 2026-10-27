@@ -20,6 +20,8 @@ const { createGuardianLocalHealthObservation } =
   require('./guardian-local-health-observation.cjs');
 const { createGuardianLocalRuntimeAssessment } =
   require('./guardian-local-runtime-assessment.cjs');
+const { createGuardianLocalTerminalPersistence } =
+  require('./guardian-local-terminal-persistence.cjs');
 
 const FIELDS = new Set(['cwd', 'entrypoint', 'directory', 'fileName',
   'startupTimeoutMs', 'shutdownTimeoutMs', 'healthProbeTimeoutMs',
@@ -72,6 +74,9 @@ function createGuardianLocalOperatorSession(options) {
   const runtimeAssessment = createGuardianLocalRuntimeAssessment({
     controller, diagnostics, healthObservation,
   });
+  const terminalPersistence = createGuardianLocalTerminalPersistence({
+    controller, diagnostics,
+  });
 
   // These two capabilities MUST NOT be composed into a single Operator
   // object. An Operator read cannot call start(), stop(), reset() or touch D1.
@@ -90,6 +95,7 @@ function createGuardianLocalOperatorSession(options) {
     probeRuntime: () => healthObservation.probe(),
     observeRuntimeHealth: () => healthObservation.observe(),
     assessRuntime: () => runtimeAssessment.assess(),
+    diagnoseTerminalPersistence: () => terminalPersistence.diagnose(),
   });
   return Object.freeze({ owner, operator });
 }
