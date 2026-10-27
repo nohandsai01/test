@@ -112,3 +112,43 @@ clean append, fault append, bundle ordering, truncation, mixed journals,
 reordering with recomputed local checksum, P0 inputs, hostile accessors
 and non-leakage. This batch is independent of Claude Code's G27–G30
 program-generation/IPC recovery work and does not alter the shared Writer.
+
+
+## G27D — owner-only offline bundle intake and redacted rejection receipts
+
+guardian-local-offline-intake.cjs provides one explicit, inert
+createGuardianOfflineIntake({ directory, fileName, maxJournalBytes? })
+factory. Import and construction do not write files, start processes or
+contact external services. The caller must separately authorize an
+owner-only local directory; only receive(JSON_TEXT) attempts to persist.
+
+- receive accepts only a bounded UTF-8 JSON string (not arbitrary JS
+  objects, streams, Buffer, provider Proxy or filesystem path). It invokes
+  the existing G27B checksum verifier and G27C pairwise bounded history
+  check; a locally compatible bundle is **QUARANTINED**, never accepted as
+  trusted custody or cleared for runtime activation.
+- Bounded classification distinguishes invalid input or checksums,
+  incomplete journal history, structurally conflicting history and
+  unverified source history. Each outcome is SOURCE_ONLY_HOLD, never
+  auto-restart, never allows Check issuance or release authority.
+- A receipt contains only a random event ID, timestamp, fixed decision/
+  reason, and checksum of a locally validated bundle. It deliberately does
+  not serialize incident events, file paths, raw input, PID, process
+  identity, secrets, credentials or original error messages.
+- Receipts are appended synchronously to a dedicated owner-only JSONL
+  journal (0600 file, owner-only directory, O_NOFOLLOW/O_APPEND, fsync).
+  Unsafe symlinks, weak permissions, oversized journal, changed directory
+  identity or write uncertainty turn the result into
+  GUARDIAN_INTAKE_STORAGE_UNVERIFIED with no persisted-success claim.
+- Repeated identical submissions generate separate audit receipts; this
+  is NOT a global anti-replay store or independently authenticated chain.
+  Neither the file nor its SHA-256 constitutes tamper-proof custody.
+  An external process supervisor or approved immutable receipt authority
+  would be required for operational provenance.
+
+Tests use real disposable local owner directories, G27A evidence capture,
+G27B bundle generation and G27C history verification. They include altered
+nested JSON, duplicate members, partial history, P0 source, JSON over-limit,
+malicious objects, unsafe file modes, symlinks, directory permissions,
+journal capacity and repeated submissions, all without modifying existing
+Host/IPC/process-generation or Check-writing code.
