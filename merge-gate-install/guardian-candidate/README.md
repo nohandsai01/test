@@ -1294,3 +1294,25 @@ read, append a real protected receipt, vary the mid-snapshot PID, poison
 the second read with exceptions/getters, and expire a RECENT observation
 while the second read is delayed. No reviewer or production activation
 is performed mid-batch.
+
+## G31A — read-only terminal callback / receipt persistence diagnosis
+
+The separated Operator facade exposes diagnoseTerminalPersistence(), a
+source-only, read-only P0/P1/P2/P3 triage adapter. It brackets two existing
+protected journal faultTriage() reads with three sanitized Controller status
+snapshots; PID/generation/error changes or journal digest drift return P0
+OBSERVATIONS_INCONSISTENT without exposing paths, PIDs or raw event data.
+
+A Controller terminal callback failure (GUARDIAN_CHILD_TERMINAL_CALLBACK_FAILED)
+is reported as P0 TERMINAL_CALLBACK_FAILURE_OBSERVED, even if the journal
+contains older successful stops. It directs the Owner to investigate the
+terminal receipt path. It does NOT assert that storage specifically failed:
+an unexpected synchronous terminal callback exception can produce the same
+Controller error. All results preserve SOURCE_ONLY_HOLD, no automated recovery,
+no evidence certification and no new release/Check authority. The feature
+never probes, starts/stops children, opens files directly or writes evidence.
+
+The diagnosis accepts both the original v1 Controller/triage fields and the
+optional generation ID, unterminated and concurrent counters staged in the
+separate G27–G30 branches. Their transitions also invalidate a stale read;
+the PR remains independently based on PR #15 and does not modify those Writers.
