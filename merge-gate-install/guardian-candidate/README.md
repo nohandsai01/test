@@ -1337,3 +1337,32 @@ The read never probes or starts/stops children, writes files, touches production
 D1, releases HOLD or emits a Check. An attacker with control of the local
 filesystem or a mount change/ABA between sampling instants can defeat this
 best-effort observation; all results retain SOURCE_ONLY_HOLD and human review.
+
+## G34A — Operator terminal callback / storage risk correlation (source only)
+
+The read-only `assessTerminalStorage()` Operator method correlates existing
+`diagnoseTerminalPersistence()` and `assessJournalStorage()` without a
+new journal reader, Check issuer, process probe or writer. Three sanitized
+Controller snapshots bracket two independently obtained samples from EACH
+source. A PID, generation, state, error-code or receipt-field change is P0
+`CORRELATION_EVIDENCE_UNVERIFIED`, with no partial evidence disclosed.
+
+P0 terminal callback failures always remain P0 even when sampled filesystem
+space is ample. A coincident low-storage observation is reported separately,
+but **causalLinkVerified=false**: a throwing terminal callback is not proof
+of an ENOSPC error. P1 historic faults or critical journal/storage pressure
+cannot be downgraded by a P2/P3 source. Any malformed evidence, unknown
+authority field, non-data descriptor or inconsistent process state is P0.
+Valid clean STOPPED / spacious snapshots are at most P3 *local observations*.
+
+The fixed, frozen receipt carries only allowlisted priorities and states; no
+PID, path, raw journal bytes, exception, tokens or keys. It always reports
+`SOURCE_ONLY_HOLD`, `liveness=NOT_PROVEN`,
+`automaticRestartAllowed=false`, `activationAllowed=false`,
+`releaseAuthority=NOT_ISSUED`; it cannot start/stop/restart children,
+erase evidence, write D1, manage credentials or issue a real GitHub Check.
+
+These samples are not an atomic filesystem transaction. A change-and-restore
+(ABA) between reads, a compromised Controller, a malicious writer controlling
+both journals, or a subsequent ENOSPC can escape detection. P3 never releases
+HOLD. Independent non-author QA and production acceptance remain separate.
