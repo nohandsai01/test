@@ -75,3 +75,40 @@ is possible. No production staging environment is accessed.
 G27B is independent of Claude Code's reserved G27–G30 process-generation,
 IPC binding and crash-recovery development, and should be integrated only
 after reconciling exact heads and Writer ownership.
+
+
+## G27C — bounded offline cross-snapshot continuity checks
+
+guardian-local-offline-brief-verifier.cjs now exposes **two more pure
+read-only functions**: compareBriefHistory(older, newer) and
+verifyBundleHistory(bundle). These consume only already checksum-checked
+G27A briefs and G27B bundles. They do not read any D1 or GitHub state,
+manage processes, persist data or modify the Operator.
+
+- G27C compares both entire **bounded** journal histories in reverse
+  chronological order (newest first) and checks whether the old event
+  sequence is an identical suffix of the newer event sequence. It also
+  validates monotonic entry count, fault-count deltas and the two protected
+  SHA-256 journal digests. Same snapshot and compatible append are distinct
+  classifications.
+- When either journal contains more than 10 receipts, or either report has
+  only a partial page, the result is **NOT_VERIFIED**. A bounded excerpt
+  without an overlapping/complete baseline must not claim append integrity.
+- Bundles of 2–8 checksum-valid reports are checked pairwise in caller
+  order. On the first conflict, the entire series returns NOT_VERIFIED with
+  no event data or partial matching pairs. Duplicate members, reordered
+  history, changed digests, invalid dynamic properties and nested duplicate
+  JSON keys remain rejected.
+- Results are strictly LOCAL_STRUCTURAL_OBSERVATION_ONLY and
+  SOURCE_ONLY_HOLD, not trust/chain custody proof. A checksum or a matched
+  structural suffix does **not** cryptographically authenticate where a
+  report came from; even a coherent fabricated history may pass. None of
+  these exports can establish liveness, grant automatic restart, clear HOLD,
+  issue a Check or authorize activation.
+
+Separate tests construct actual disposable owner-only terminal journals
+and capture successive G27A briefs before and after appends. They cover
+clean append, fault append, bundle ordering, truncation, mixed journals,
+reordering with recomputed local checksum, P0 inputs, hostile accessors
+and non-leakage. This batch is independent of Claude Code's G27–G30
+program-generation/IPC recovery work and does not alter the shared Writer.
