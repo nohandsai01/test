@@ -1494,3 +1494,117 @@ only JSONL records, forged or changed signed fields, invalid pin,
 wrong anchor, sequence replay, malformed nested JSON, symlink/hardlink
 or permission defects, ledger corruption and in-flight changes.
 No real trusted anchor, payment, Merge, Deploy, Check or app mutation.
+
+
+## G34 — Offline duplicate-signed-baseline conflict detector (source-only)
+
+The module guardian-signed-baseline-equivocation.cjs takes G33-compatible
+**JSON text** envelopes signed with Ed25519 and checks whether a single
+owner-supplied key/anchor has signed contradictory statements for the
+same sequence number. Input is strict UTF-8, fixed G33 fields, bounded
+8 KiB, duplicate-key checked, canonical base64 checked and
+domain-separated using the original G33 signing contract. Before any
+comparison, every statement must independently verify against the
+owner-supplied Ed25519 public key whose SPKI SHA-256 equals the provided
+pin. No sender URL, network, D1, Check writer, production key management
+or filesystem write is involved.
+
+- compare(leftText,rightText) verifies both independent signatures, then
+  classifies same-sequence conflicting signed payloads as a LOCAL_SIGNED_
+  CONFLICT_ONLY observation. Identical signed assertions are replay
+  observations; descending sequences are rollback observations; ascending
+  sequences are merely local signed order, NOT proof that any appended
+  journal/ledger history, real event or external custody exists.
+- observe(text) is a strictly bounded SAME-INSTANCE, in-memory witness
+  that retains at most 64 signed sequence/digest observations without
+  eviction. It permanently latches SOURCE_ONLY_HOLD on a detected
+  equivocation or exhausted capacity. Invalid input cannot insert an
+  observation, manufacture an anchor or clear a latch. A fresh process
+  has no prior observation; replay/rollback across restart remain
+  unverified, as before.
+- An output never includes raw packets, secrets or arbitrary metadata.
+  It always returns SOURCE_ONLY_HOLD, externalAnchorVerified=false,
+  historicalCompletenessVerified=false, custodyVerified=false,
+  durableAntiRollbackVerified=false, liveness=NOT_PROVEN,
+  automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED.
+
+A locally valid owner-pinned signature does NOT prove the signing key is
+independently trusted. A single pinned signer could issue arbitrary
+fabricated statements; source-only equivocation detection is an aid to
+manual investigation, not approval of external custody, authentication,
+production launch, Check publication, Merge or Deploy.
+
+G34 is a separate stack on top of the accepted PR #20 exact head, with
+only a new isolated module, focused negative tests and this README note.
+Tests use throwaway in-memory synthetic Ed25519 fixture keys and do not
+generate or provision production credentials. No live credential,
+trusted external anchor or hosted integration is exercised.
+
+
+## G35 — bounded, atomic offline signed-baseline batch observation
+
+The source-only G34 witness now exports a third method, observeBatch,
+accepting a dense array of 1–16 signed G33 JSON TEXT envelopes for the
+same owner-supplied pinned Ed25519 key/Anchor ID. This function snapshots
+a dense array through property descriptors without invoking getters or
+iterators, and cryptographically validates EVERY signature before
+checking order. Invalid members cannot partially advance the witness.
+
+- All sequences in a batch must be strictly increasing and newer than
+  previous observations. Replays, descending values or duplicate
+  sequences reject the WHOLE batch with no partially accepted records.
+- Contradictory valid signatures for the same anchor and sequence are
+  local equivocation evidence and permanently latch the same in-memory
+  witness to HOLD. A failed batch imports no valid prefix.
+- Witness memory is bounded to 64 signed observations, with no eviction.
+  Exhausting capacity permanently latches HOLD and imports none of the
+  oversized batch. No source bytes, keys or signed metadata are returned.
+- The first accepted batch is explicitly UNANCHORED; following batches
+  represent ONLY local signed order, NOT contiguous sequence proof,
+  Journal/Ledger append integrity, trusted external signer identity or
+  cross-restart antirollback. Every result stays SOURCE_ONLY_HOLD,
+  externalAnchorVerified=false, durableAntiRollbackVerified=false,
+  historicalCompletenessVerified=false, custodyVerified=false,
+  liveness=NOT_PROVEN, releaseAuthority=NOT_ISSUED.
+
+Tests use temporary in-memory Ed25519 fixture keypairs and cover
+invalid final member, wrong signing key, same-sequence signed conflict
+within batch and prior history, duplicates, rollbacks, hostile
+accessors/Proxy/sparse inputs, capacity exhaustion, first unanchored
+observation and new-instance restart semantics.
+No keys/anchors are installed, no production service is contacted.
+
+
+## G36 — portable, unauthenticated cross-verifier signed-evidence handoff
+
+The new guardian-signed-baseline-handoff.cjs exports:
+prepareHandoff(signedStatementTexts) and verifyHandoff(handoffJsonText).
+No signer key, remote URL, file IO, credential access or trust registry.
+
+- Sender validates a dense array of 1–16 G33 Ed25519-signed JSON texts
+  against an owner-pinned SPKI SHA-256 using a fresh G35 verifier. It
+  packages unchanged signed statements into a fixed, versioned and
+  bounded JSON transport contract with Anchor ID, signer fingerprint,
+  statement count, first/last sequence and a domain-separated SHA-256
+  of the outer canonical contract. Outer SHA-256 is just a checksum.
+- Receiver validates bounded strict UTF-8 JSON and rejects duplicate
+  keys, unknown/missing fields, altered pin/Anchor/scope, invalid array,
+  checksum mismatch, or false first/last claims BEFORE changing its
+  own G35 in-memory witness. It re-verifies EVERY inner Ed25519
+  signature and commits only an entire valid sequence-ordered batch.
+- Repeated handoff, rollback, conflicting correctly signed statements
+  and exhausted in-memory witness capacity never count as acceptance.
+  A valid-signature conflict latches local HOLD; invalid final members
+  cannot cause earlier statements to be partially admitted.
+- A fresh verifier instance has no prior trusted state: it may again
+  regard a previously received valid handoff as a first unanchored
+  comparison. This does NOT demonstrate independently approved external
+  custody, durable antirollback or cross-restart replay protection.
+
+All results are SOURCE_ONLY_HOLD, externalAnchorVerified=false,
+durableCustodyVerified=false, historicalCompletenessVerified=false,
+durableAntiRollbackVerified=false, liveness=NOT_PROVEN,
+automaticRestartAllowed=false, activationAllowed=false and
+releaseAuthority=NOT_ISSUED. No real Cloudflare D1, GitHub Check,
+external trust anchor, key registration, production runtime mutation,
+Merge, Deploy or payment. Synthetic Ed25519 keys exist only in tests.
