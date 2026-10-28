@@ -1494,3 +1494,48 @@ only JSONL records, forged or changed signed fields, invalid pin,
 wrong anchor, sequence replay, malformed nested JSON, symlink/hardlink
 or permission defects, ledger corruption and in-flight changes.
 No real trusted anchor, payment, Merge, Deploy, Check or app mutation.
+
+
+## G34 — Offline duplicate-signed-baseline conflict detector (source-only)
+
+The module guardian-signed-baseline-equivocation.cjs takes G33-compatible
+**JSON text** envelopes signed with Ed25519 and checks whether a single
+owner-supplied key/anchor has signed contradictory statements for the
+same sequence number. Input is strict UTF-8, fixed G33 fields, bounded
+8 KiB, duplicate-key checked, canonical base64 checked and
+domain-separated using the original G33 signing contract. Before any
+comparison, every statement must independently verify against the
+owner-supplied Ed25519 public key whose SPKI SHA-256 equals the provided
+pin. No sender URL, network, D1, Check writer, production key management
+or filesystem write is involved.
+
+- compare(leftText,rightText) verifies both independent signatures, then
+  classifies same-sequence conflicting signed payloads as a LOCAL_SIGNED_
+  CONFLICT_ONLY observation. Identical signed assertions are replay
+  observations; descending sequences are rollback observations; ascending
+  sequences are merely local signed order, NOT proof that any appended
+  journal/ledger history, real event or external custody exists.
+- observe(text) is a strictly bounded SAME-INSTANCE, in-memory witness
+  that retains at most 64 signed sequence/digest observations without
+  eviction. It permanently latches SOURCE_ONLY_HOLD on a detected
+  equivocation or exhausted capacity. Invalid input cannot insert an
+  observation, manufacture an anchor or clear a latch. A fresh process
+  has no prior observation; replay/rollback across restart remain
+  unverified, as before.
+- An output never includes raw packets, secrets or arbitrary metadata.
+  It always returns SOURCE_ONLY_HOLD, externalAnchorVerified=false,
+  historicalCompletenessVerified=false, custodyVerified=false,
+  durableAntiRollbackVerified=false, liveness=NOT_PROVEN,
+  automaticRestartAllowed=false and releaseAuthority=NOT_ISSUED.
+
+A locally valid owner-pinned signature does NOT prove the signing key is
+independently trusted. A single pinned signer could issue arbitrary
+fabricated statements; source-only equivocation detection is an aid to
+manual investigation, not approval of external custody, authentication,
+production launch, Check publication, Merge or Deploy.
+
+G34 is a separate stack on top of the accepted PR #20 exact head, with
+only a new isolated module, focused negative tests and this README note.
+Tests use throwaway in-memory synthetic Ed25519 fixture keys and do not
+generate or provision production credentials. No live credential,
+trusted external anchor or hosted integration is exercised.
