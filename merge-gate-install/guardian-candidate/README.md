@@ -1573,3 +1573,38 @@ within batch and prior history, duplicates, rollbacks, hostile
 accessors/Proxy/sparse inputs, capacity exhaustion, first unanchored
 observation and new-instance restart semantics.
 No keys/anchors are installed, no production service is contacted.
+
+
+## G36 — portable, unauthenticated cross-verifier signed-evidence handoff
+
+The new guardian-signed-baseline-handoff.cjs exports:
+prepareHandoff(signedStatementTexts) and verifyHandoff(handoffJsonText).
+No signer key, remote URL, file IO, credential access or trust registry.
+
+- Sender validates a dense array of 1–16 G33 Ed25519-signed JSON texts
+  against an owner-pinned SPKI SHA-256 using a fresh G35 verifier. It
+  packages unchanged signed statements into a fixed, versioned and
+  bounded JSON transport contract with Anchor ID, signer fingerprint,
+  statement count, first/last sequence and a domain-separated SHA-256
+  of the outer canonical contract. Outer SHA-256 is just a checksum.
+- Receiver validates bounded strict UTF-8 JSON and rejects duplicate
+  keys, unknown/missing fields, altered pin/Anchor/scope, invalid array,
+  checksum mismatch, or false first/last claims BEFORE changing its
+  own G35 in-memory witness. It re-verifies EVERY inner Ed25519
+  signature and commits only an entire valid sequence-ordered batch.
+- Repeated handoff, rollback, conflicting correctly signed statements
+  and exhausted in-memory witness capacity never count as acceptance.
+  A valid-signature conflict latches local HOLD; invalid final members
+  cannot cause earlier statements to be partially admitted.
+- A fresh verifier instance has no prior trusted state: it may again
+  regard a previously received valid handoff as a first unanchored
+  comparison. This does NOT demonstrate independently approved external
+  custody, durable antirollback or cross-restart replay protection.
+
+All results are SOURCE_ONLY_HOLD, externalAnchorVerified=false,
+durableCustodyVerified=false, historicalCompletenessVerified=false,
+durableAntiRollbackVerified=false, liveness=NOT_PROVEN,
+automaticRestartAllowed=false, activationAllowed=false and
+releaseAuthority=NOT_ISSUED. No real Cloudflare D1, GitHub Check,
+external trust anchor, key registration, production runtime mutation,
+Merge, Deploy or payment. Synthetic Ed25519 keys exist only in tests.
