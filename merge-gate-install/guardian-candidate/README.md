@@ -1539,3 +1539,37 @@ only a new isolated module, focused negative tests and this README note.
 Tests use throwaway in-memory synthetic Ed25519 fixture keys and do not
 generate or provision production credentials. No live credential,
 trusted external anchor or hosted integration is exercised.
+
+
+## G35 — bounded, atomic offline signed-baseline batch observation
+
+The source-only G34 witness now exports a third method, observeBatch,
+accepting a dense array of 1–16 signed G33 JSON TEXT envelopes for the
+same owner-supplied pinned Ed25519 key/Anchor ID. This function snapshots
+a dense array through property descriptors without invoking getters or
+iterators, and cryptographically validates EVERY signature before
+checking order. Invalid members cannot partially advance the witness.
+
+- All sequences in a batch must be strictly increasing and newer than
+  previous observations. Replays, descending values or duplicate
+  sequences reject the WHOLE batch with no partially accepted records.
+- Contradictory valid signatures for the same anchor and sequence are
+  local equivocation evidence and permanently latch the same in-memory
+  witness to HOLD. A failed batch imports no valid prefix.
+- Witness memory is bounded to 64 signed observations, with no eviction.
+  Exhausting capacity permanently latches HOLD and imports none of the
+  oversized batch. No source bytes, keys or signed metadata are returned.
+- The first accepted batch is explicitly UNANCHORED; following batches
+  represent ONLY local signed order, NOT contiguous sequence proof,
+  Journal/Ledger append integrity, trusted external signer identity or
+  cross-restart antirollback. Every result stays SOURCE_ONLY_HOLD,
+  externalAnchorVerified=false, durableAntiRollbackVerified=false,
+  historicalCompletenessVerified=false, custodyVerified=false,
+  liveness=NOT_PROVEN, releaseAuthority=NOT_ISSUED.
+
+Tests use temporary in-memory Ed25519 fixture keypairs and cover
+invalid final member, wrong signing key, same-sequence signed conflict
+within batch and prior history, duplicates, rollbacks, hostile
+accessors/Proxy/sparse inputs, capacity exhaustion, first unanchored
+observation and new-instance restart semantics.
+No keys/anchors are installed, no production service is contacted.

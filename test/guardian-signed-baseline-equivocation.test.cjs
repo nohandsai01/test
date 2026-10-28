@@ -69,9 +69,9 @@ function deny(v, reason){
   assert.equal(v.earlierSignedSha256,null);
   assert.equal(v.laterSignedSha256,null);
 }
-test('module construction is inert and only exports two frozen read-only capabilities',()=>{
+test('module construction is inert and exposes exactly three frozen, nonauthorizing capabilities',()=>{
   const f=fixture(),w=f.create();
-  assert.deepEqual(Object.keys(w),['compare','observe']);
+  assert.deepEqual(Object.keys(w),['compare','observe','observeBatch']);
   assert.ok(Object.isFrozen(w));
   deny(w.observe('{}'),'GUARDIAN_SIGNED_BASELINE_INPUT_UNVERIFIED');
   assert.equal(w.compare(null,'').comparison,'NOT_VERIFIED');

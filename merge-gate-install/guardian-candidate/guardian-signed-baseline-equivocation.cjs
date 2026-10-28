@@ -32,6 +32,7 @@ const ANCHOR = /^[a-z][a-z0-9-]{3,63}$/;
 const UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 const MAX_BYTES = 8192;
 const MAX_OBSERVATIONS = 64;
+const MAX_BATCH = 16;
 
 function ownData(value, allowed, requireAll) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -202,6 +203,103 @@ function createGuardianSignedBaselineEquivocationVerifier(options) {
     return output('GUARDIAN_SIGNED_BASELINE_MONOTONIC_ORDER_OBSERVED',
       priorLast,v,seen.size);
   }
-  return Object.freeze({compare,observe});
+  // G35: snapshot every array member without invoking any accessor or
+  // array iterator, even on Proxy/hostile inputs. Validate the WHOLE batch
+  // before modifying the same-instance witness, so a malformed tail
+  // cannot silently record a valid prefix as accepted.
+  function cleanBatch(input) {
+    try {
+      if (!Array.isArray(input)) return null;
+      const descriptors = Object.getOwnPropertyDescriptors(input);
+      const length = descriptors.length?.value;
+      if (!Number.isSafeInteger(length) || length < 1 ||
+          length > MAX_BATCH ||
+          Reflect.ownKeys(input).length !== length + 1) return null;
+      const values=[];
+      for(let i=0;i<length;i++) {
+        const key=String(i), entry=descriptors[key];
+        if (!entry || !Object.hasOwn(entry,'value') ||
+            entry.enumerable !== true ||
+            typeof entry.value !== 'string') return null;
+        values.push(entry.value);
+      }
+      return values;
+    } catch (_) { return null; }
+  }
+  function batchOutcome(reason, count, added = 0, first = null, end = null) {
+    const accepted = reason ===
+        'GUARDIAN_SIGNED_BASELINE_BATCH_LOCAL_ORDER_OBSERVED' ||
+      reason ===
+        'GUARDIAN_SIGNED_BASELINE_BATCH_FIRST_UNANCHORED_OBSERVATION';
+    return Object.freeze({
+      schemaVersion:1,
+      kind:'GUARDIAN_SIGNED_BASELINE_BATCH_V1',
+      status:'SOURCE_ONLY_HOLD',
+      authority:'OWNER_PINNED_PUBLIC_KEY_UNATTESTED',
+      comparison:accepted?'LOCAL_SIGNED_BATCH_ORDER_ONLY':'NOT_VERIFIED',
+      reason,
+      observedStatements:count,
+      addedStatements:accepted?added:0,
+      firstSequence:accepted?first.sequence:null,
+      lastSequence:accepted?end.sequence:null,
+      locallyVerifiedSignatures:accepted,
+      externalAnchorVerified:false,
+      historicalCompletenessVerified:false,
+      custodyVerified:false,
+      durableAntiRollbackVerified:false,
+      liveness:'NOT_PROVEN',
+      manualInterventionRequired:true,
+      automaticRestartAllowed:false,
+      activationAllowed:false,
+      releaseAuthority:'NOT_ISSUED',
+    });
+  }
+  function observeBatch(input) {
+    if (latched) return batchOutcome(
+      'GUARDIAN_SIGNED_BASELINE_CONFLICT_LATCHED',seen.size);
+    const inputs=cleanBatch(input);
+    if (!inputs) return batchOutcome(
+      'GUARDIAN_SIGNED_BASELINE_BATCH_INVALID',seen.size);
+    // Parse/signature-verify ALL statements before evaluating any.
+    const signed=inputs.map(parse);
+    if (signed.some(x=>x===null)) return batchOutcome(
+      'GUARDIAN_SIGNED_BASELINE_BATCH_INVALID',seen.size);
+    const staged=new Map(seen);
+    let highest=maximum;
+    for(const statement of signed) {
+      const prior=staged.get(statement.sequence);
+      if (prior) {
+        if (prior.digest !== statement.digest) {
+          // Both signatures are valid for the same anchor+sequence;
+          // observed equivocation is sticky, but no part of this batch
+          // is committed to the witness map.
+          latched=true;
+          return batchOutcome(
+            'GUARDIAN_SIGNED_BASELINE_BATCH_EQUIVOCATION_OBSERVED',seen.size);
+        }
+        return batchOutcome(
+          'GUARDIAN_SIGNED_BASELINE_BATCH_REPLAY_OBSERVED',seen.size);
+      }
+      if (statement.sequence <= highest) return batchOutcome(
+        'GUARDIAN_SIGNED_BASELINE_BATCH_ROLLBACK_OBSERVED',seen.size);
+      staged.set(statement.sequence,statement);
+      highest=statement.sequence;
+    }
+    if(staged.size>MAX_OBSERVATIONS){
+      // Do not evict earlier evidence to hide future conflicts.
+      latched=true;
+      return batchOutcome(
+        'GUARDIAN_SIGNED_BASELINE_MEMORY_LIMIT_REACHED',seen.size);
+    }
+    for(const v of signed)seen.set(v.sequence,v);
+    const startedWithNone=last===null;
+    last=signed[signed.length-1];
+    maximum=last.sequence;
+    return batchOutcome(startedWithNone ?
+      'GUARDIAN_SIGNED_BASELINE_BATCH_FIRST_UNANCHORED_OBSERVATION' :
+      'GUARDIAN_SIGNED_BASELINE_BATCH_LOCAL_ORDER_OBSERVED',
+      seen.size,signed.length,signed[0],last);
+  }
+  return Object.freeze({compare,observe,observeBatch});
 }
 module.exports=Object.freeze({createGuardianSignedBaselineEquivocationVerifier});
