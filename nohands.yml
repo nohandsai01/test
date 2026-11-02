@@ -25,3 +25,4 @@ required_evidence:
 trusted_evidence_workflows:
   - tests|guardian-pilot-tests|.github/workflows/guardian-pilot-controller.yml
   - ci|guardian-pilot-ci|.github/workflows/guardian-pilot-controller.yml
+mandate_json: '{"mandate_id":"guardian-pr36-required-check-20261102-1410z","repository":"nohandsai01/test","protected_branch":"guardian/pilot-policy-base-20261102","initiator_node_id":"MDQ6VXNlcjgyOTQ1MjI4","allowed_path_globs":[".github/workflows/nohands-guardian-required-check.yml"],"expires_at":"2026-11-02T16:30:00Z","allows_privileged":true,"issuer":"FOUNDER_CHAT_NEXT_STEP_20261102","mandate_sha256":"c462314c86c01e1928f3a548907a89a0700f571e697783e9471ea697ec334801"}'
