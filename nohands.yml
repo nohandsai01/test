@@ -22,5 +22,5 @@ required_evidence:
   - ci
 
 trusted_evidence_workflows:
-  - tests|guardian-pilot-tests|.github/workflows/guardian-pilot-tests.yml
-  - ci|guardian-pilot-ci|.github/workflows/guardian-pilot-ci.yml
+  - tests|guardian-pilot-tests|.github/workflows/guardian-pilot-controller.yml
+  - ci|guardian-pilot-ci|.github/workflows/guardian-pilot-controller.yml

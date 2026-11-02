@@ -1,6 +1,6 @@
 # PREPARATION ONLY — future target path:
 # .github/workflows/guardian-pilot-ci.yml
-name: guardian-pilot-ci
+name: guardian-pilot-worker-ci
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   ci:
-    name: guardian-pilot-ci
+    name: guardian-pilot-worker-ci
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact candidate head
