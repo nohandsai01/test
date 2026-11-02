@@ -1,0 +1,2 @@
+NO HANDS Guardian native enforcement ROGUE probe.
+This is test-only and must be denied by prohibited_paths.
