@@ -59,3 +59,25 @@ jobs:
           receipt-path: nohands-merge-gate-receipt.json
           base-sha: ${{ github.event.pull_request.base.sha }}
           reviewed-head: ${{ github.event.review.commit_id }}
+
+
+      - name: Report Guardian verdict
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f nohands-merge-gate-receipt.json ]; then
+            echo "GUARDIAN_RECEIPT=NOT_PRESENT"
+            exit 0
+          fi
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const r = JSON.parse(fs.readFileSync('nohands-merge-gate-receipt.json', 'utf8'));
+          const findings = Array.isArray(r.findings) ? r.findings.map((f) => ({
+            code: f.code ?? null,
+            severity: f.severity ?? null,
+            path: f.path ?? null,
+          })) : [];
+          console.log('GUARDIAN_VERDICT=' + String(r.verdict || 'UNKNOWN'));
+          console.log('GUARDIAN_FINDINGS=' + JSON.stringify(findings));
+          NODE
