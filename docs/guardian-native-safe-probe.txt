@@ -1,0 +1,2 @@
+NO HANDS Guardian native enforcement SAFE probe.
+Expected policy classification: authorized docs/** change.
