@@ -1,6 +1,6 @@
 # PREPARATION ONLY — future target path:
 # .github/workflows/guardian-pilot-tests.yml
-name: guardian-pilot-tests
+name: guardian-pilot-worker-tests
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   tests:
-    name: guardian-pilot-tests
+    name: guardian-pilot-worker-tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact candidate head
