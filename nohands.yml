@@ -4,6 +4,7 @@ authorized_paths:
   - src/**
   - test/**
   - docs/**
+  - .github/workflows/nohands-guardian-required-check.yml
 
 prohibited_paths:
   - .github/workflows/deploy.yml
