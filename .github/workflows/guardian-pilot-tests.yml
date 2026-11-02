@@ -1,0 +1,28 @@
+name: guardian-pilot-worker-tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: guardian-pilot-worker-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact candidate head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Run deterministic first-pilot tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f src/guardian-pilot-smoke.cjs
+          test -f test/guardian-pilot-smoke.test.cjs
+          node --test test/guardian-pilot-smoke.test.cjs
