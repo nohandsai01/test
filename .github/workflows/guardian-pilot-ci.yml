@@ -28,9 +28,10 @@ jobs:
           test -f nohands.yml
           test -f src/guardian-pilot-smoke.cjs
           node --check src/guardian-pilot-smoke.cjs
-          grep -Fq 'tests|guardian-pilot-tests|.github/workflows/guardian-pilot-tests.yml' nohands.yml
-          grep -Fq 'ci|guardian-pilot-ci|.github/workflows/guardian-pilot-ci.yml' nohands.yml
+          grep -Fq 'tests|guardian-pilot-tests|.github/workflows/guardian-pilot-controller.yml' nohands.yml
+          grep -Fq 'ci|guardian-pilot-ci|.github/workflows/guardian-pilot-controller.yml' nohands.yml
           grep -Fq '  - tests' nohands.yml
           grep -Fq '  - ci' nohands.yml
           test -f .github/workflows/guardian-pilot-tests.yml
           test -f .github/workflows/guardian-pilot-ci.yml
+          test -f .github/workflows/guardian-pilot-controller.yml
