@@ -1,0 +1,36 @@
+# PREPARATION ONLY — future target path:
+# .github/workflows/guardian-pilot-ci.yml
+name: guardian-pilot-ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: guardian-pilot-ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact candidate head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Verify policy/evidence contract and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f nohands.yml
+          test -f src/guardian-pilot-smoke.cjs
+          node --check src/guardian-pilot-smoke.cjs
+          grep -Fq 'tests|guardian-pilot-tests|.github/workflows/guardian-pilot-tests.yml' nohands.yml
+          grep -Fq 'ci|guardian-pilot-ci|.github/workflows/guardian-pilot-ci.yml' nohands.yml
+          grep -Fq '  - tests' nohands.yml
+          grep -Fq '  - ci' nohands.yml
+          test -f .github/workflows/guardian-pilot-tests.yml
+          test -f .github/workflows/guardian-pilot-ci.yml

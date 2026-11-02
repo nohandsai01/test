@@ -1,17 +1,28 @@
+# PREPARATION ONLY.
+# Future installation path: /nohands.yml in nohandsai01/test
 version: 1
+
 authorized_paths:
   - src/**
   - test/**
   - docs/**
+
 prohibited_paths:
   - .github/workflows/deploy.yml
   - infra/production/**
+
 private_paths:
   - .env
   - secrets/**
+
 human_review_paths:
   - package.json
   - package-lock.json
+
 required_evidence:
   - tests
   - ci
+
+trusted_evidence_workflows:
+  - tests|guardian-pilot-tests|.github/workflows/guardian-pilot-tests.yml
+  - ci|guardian-pilot-ci|.github/workflows/guardian-pilot-ci.yml
