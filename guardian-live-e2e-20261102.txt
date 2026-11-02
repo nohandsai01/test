@@ -1,0 +1,3 @@
+NO HANDS AI Guardian live merge E2E disposable fixture
+Date: 2026-11-02
+Purpose: bounded merge-async test only
