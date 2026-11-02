@@ -19,11 +19,11 @@ jobs:
       - name: Verify immutable trusted policy ref
         shell: bash
         env:
-          TRUSTED_POLICY_REF: bd6d679cdc86cf0ad392c5ee2504e897d8e450fb
+          TRUSTED_POLICY_REF: 718571ca62cb46a270c132af2faa34474134a0b8
         run: |
           set -euo pipefail
           echo "$TRUSTED_POLICY_REF" | grep -Eq '^[0-9a-f]{40}$'
-          test "$TRUSTED_POLICY_REF" = "bd6d679cdc86cf0ad392c5ee2504e897d8e450fb"
+          test "$TRUSTED_POLICY_REF" = "718571ca62cb46a270c132af2faa34474134a0b8"
 
       - name: Checkout exact reviewed head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -54,7 +54,7 @@ jobs:
         uses: ./.nohands-guardian-action
         with:
           config-path: nohands.yml
-          trusted-policy-ref: bd6d679cdc86cf0ad392c5ee2504e897d8e450fb
+          trusted-policy-ref: 718571ca62cb46a270c132af2faa34474134a0b8
           github-token: ${{ github.token }}
           receipt-path: nohands-merge-gate-receipt.json
           base-sha: ${{ github.event.pull_request.base.sha }}
