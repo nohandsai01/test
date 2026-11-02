@@ -1,0 +1,54 @@
+# PREPARATION ONLY — future target path:
+# .github/workflows/nohands-guardian-required-check.yml
+#
+# This file is intentionally inert while stored as .example in the candidate pack.
+# Before any installation, replace bd6d679cdc86cf0ad392c5ee2504e897d8e450fb with the
+# exact immutable commit that contains the approved nohands.yml and trusted workflows.
+#
+# Receipt publication is deliberately NOT included in this candidate. Before activation,
+# choose and independently review an immutable artifact-publisher action pin, or another
+# approved customer-owned durable receipt path. A mutable tag such as @v4 is not accepted
+# as the final production pin.
+name: NO HANDS Guardian / required-check
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  actions: read
+
+jobs:
+  guardian:
+    name: NO HANDS Guardian / required-check
+    if: github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse unresolved policy placeholder
+        shell: bash
+        env:
+          TRUSTED_POLICY_REF: bd6d679cdc86cf0ad392c5ee2504e897d8e450fb
+        run: |
+          set -euo pipefail
+          test "$TRUSTED_POLICY_REF" != "bd6d679cdc86cf0ad392c5ee2504e897d8e450fb"
+          echo "$TRUSTED_POLICY_REF" | grep -Eq '^[0-9a-f]{40}$'
+
+      - name: Checkout exact reviewed head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Evaluate exact reviewed head
+        uses: nohandsai/merge-gate@1201999ba9f383ec4f8ddb0e99f99d37a3bdf664
+        with:
+          config-path: nohands.yml
+          trusted-policy-ref: bd6d679cdc86cf0ad392c5ee2504e897d8e450fb
+          github-token: ${{ github.token }}
+          receipt-path: nohands-merge-gate-receipt.json
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          reviewed-head: ${{ github.event.review.commit_id }}
