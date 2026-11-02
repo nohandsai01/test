@@ -1,14 +1,3 @@
-# PREPARATION ONLY — future target path:
-# .github/workflows/nohands-guardian-required-check.yml
-#
-# This file is intentionally inert while stored as .example in the candidate pack.
-# Before any installation, replace bd6d679cdc86cf0ad392c5ee2504e897d8e450fb with the
-# exact immutable commit that contains the approved nohands.yml and trusted workflows.
-#
-# Receipt publication is deliberately NOT included in this candidate. Before activation,
-# choose and independently review an immutable artifact-publisher action pin, or another
-# approved customer-owned durable receipt path. A mutable tag such as @v4 is not accepted
-# as the final production pin.
 name: NO HANDS Guardian / required-check
 
 on:
@@ -27,14 +16,14 @@ jobs:
     if: github.event.review.state == 'approved'
     runs-on: ubuntu-latest
     steps:
-      - name: Refuse unresolved policy placeholder
+      - name: Verify immutable trusted policy ref
         shell: bash
         env:
           TRUSTED_POLICY_REF: bd6d679cdc86cf0ad392c5ee2504e897d8e450fb
         run: |
           set -euo pipefail
-          test "$TRUSTED_POLICY_REF" != "bd6d679cdc86cf0ad392c5ee2504e897d8e450fb"
           echo "$TRUSTED_POLICY_REF" | grep -Eq '^[0-9a-f]{40}$'
+          test "$TRUSTED_POLICY_REF" = "bd6d679cdc86cf0ad392c5ee2504e897d8e450fb"
 
       - name: Checkout exact reviewed head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -43,8 +32,26 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
+      - name: Checkout exact private Guardian Action
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nohandsai/merge-gate
+          ref: 1201999ba9f383ec4f8ddb0e99f99d37a3bdf664
+          ssh-key: ${{ secrets.NOHANDS_GUARDIAN_MERGE_GATE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: .nohands-guardian-action
+
+      - name: Verify exact private Guardian Action checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C .nohands-guardian-action rev-parse HEAD)" = "1201999ba9f383ec4f8ddb0e99f99d37a3bdf664"
+          test -f .nohands-guardian-action/action.yml
+          test -f .nohands-guardian-action/action/index.cjs
+
       - name: Evaluate exact reviewed head
-        uses: nohandsai/merge-gate@1201999ba9f383ec4f8ddb0e99f99d37a3bdf664
+        uses: ./.nohands-guardian-action
         with:
           config-path: nohands.yml
           trusted-policy-ref: bd6d679cdc86cf0ad392c5ee2504e897d8e450fb
