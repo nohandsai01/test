@@ -1,0 +1,61 @@
+name: NO HANDS Guardian / required-check
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  actions: read
+
+jobs:
+  guardian:
+    name: NO HANDS Guardian / required-check
+    if: github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify immutable trusted policy ref
+        shell: bash
+        env:
+          TRUSTED_POLICY_REF: 6bc90c135be198ca1908699084190d85f509ba61
+        run: |
+          set -euo pipefail
+          echo "$TRUSTED_POLICY_REF" | grep -Eq '^[0-9a-f]{40}$'
+          test "$TRUSTED_POLICY_REF" = "6bc90c135be198ca1908699084190d85f509ba61"
+
+      - name: Checkout exact reviewed head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Checkout exact private Guardian Action
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nohandsai/merge-gate
+          ref: 1201999ba9f383ec4f8ddb0e99f99d37a3bdf664
+          ssh-key: ${{ secrets.NOHANDS_GUARDIAN_MERGE_GATE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: .nohands-guardian-action
+
+      - name: Verify exact private Guardian Action checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C .nohands-guardian-action rev-parse HEAD)" = "1201999ba9f383ec4f8ddb0e99f99d37a3bdf664"
+          test -f .nohands-guardian-action/action.yml
+          test -f .nohands-guardian-action/action/index.cjs
+
+      - name: Evaluate exact reviewed head
+        uses: ./.nohands-guardian-action
+        with:
+          config-path: nohands.yml
+          trusted-policy-ref: 6bc90c135be198ca1908699084190d85f509ba61
+          github-token: ${{ github.token }}
+          receipt-path: nohands-merge-gate-receipt.json
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          reviewed-head: ${{ github.event.review.commit_id }}
