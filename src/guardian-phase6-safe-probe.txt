@@ -1,0 +1,2 @@
+NO HANDS Guardian Phase 6 SAFE probe.
+No runtime side effect. Validation-only source change.
