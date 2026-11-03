@@ -1,0 +1,2 @@
+NO HANDS Guardian Phase 6 ROGUE probe.
+Validation-only marker. No deploy or runtime side effect.
