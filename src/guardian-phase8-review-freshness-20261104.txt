@@ -1,0 +1,3 @@
+NO HANDS AI Guardian native review freshness acceptance
+Case: synthetic safe file, version 1
+Scope: public test repository only; no merge or deploy.
